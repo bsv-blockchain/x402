@@ -68,6 +68,8 @@ and fill required environment variables:
 
 - `FACILITATOR_URL` - Facilitator endpoint URL
 - `APTOS_ADDRESS` - Aptos account address to receive payments (optional for `all-networks`)
+- `BSV_IDENTITY_KEY` - BSV recipient wallet identity public key (compressed hex; optional for `all-networks`; payments settle into the wallet holding this key)
+- `BSV_NETWORK` - BSV network CAIP-2 (optional; defaults to `bsv:mainnet`)
 - `CCD_ADDRESS` - Concordium account address to receive payments (optional for `all-networks`)
 - `EVM_ADDRESS` - Ethereum address to receive payments
 - `SVM_ADDRESS` - Solana address to receive payments (optional for `all-networks`)

@@ -38,6 +38,7 @@ cp .env-local .env
 
 and fill required environment variables:
 
+- `BSV_WALLET` - set to `true` to pay via a running BRC-100 wallet, e.g. BSV Desktop (optional; `all-networks`; BSV payers use a wallet connection instead of a raw private key)
 - `CCD_PRIVATE_KEY` - Concordium Ed25519 private key for Concordium payments (optional; `all-networks`)
 - `CCD_ADDRESS` - Concordium account address for Concordium payments (optional; `all-networks`)
 - `EVM_PRIVATE_KEY` - Ethereum private key for EVM payments

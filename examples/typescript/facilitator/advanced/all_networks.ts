@@ -5,12 +5,14 @@
  * optional chain configuration via environment variables.
  *
  * New chain support should be added here in alphabetic order by network prefix
- * (e.g., "algorand" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm").
+ * (e.g., "algorand" before "bsv" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm").
  */
 
 import * as KeetaNet from "@keetanetwork/keetanet-client";
+import { ServerWallet } from "@bsv/simple/server";
 import { toFacilitatorAvmSigner } from "@x402/avm";
 import { ExactAvmScheme } from "@x402/avm/exact/facilitator";
+import { ExactBsvScheme } from "@x402/bsv/exact/facilitator";
 import { ExactConcordiumScheme } from "@x402/concordium/exact/facilitator";
 import {
   CONCORDIUM_TESTNET_CAIP2,
@@ -78,6 +80,11 @@ const PORT = process.env.PORT || "4022";
 
 // Configuration - optional per network (alphabetic order)
 const avmPrivateKey = process.env.AVM_PRIVATE_KEY as string | undefined;
+// BSV settlement internalizes into the recipient's server-side BRC-100 wallet
+// (@bsv/simple ServerWallet: private key + wallet storage endpoint).
+const bsvServerPrivateKey = process.env.BSV_SERVER_PRIVATE_KEY as string | undefined;
+const bsvWalletStorageUrl =
+  process.env.BSV_WALLET_STORAGE_URL || "https://store-us-1.bsvb.tech";
 const ccdFacilitatorPrivateKey = process.env.CCD_FACILITATOR_PRIVATE_KEY as
   | string
   | undefined;
@@ -104,6 +111,7 @@ const hederaPrivateKey = process.env.HEDERA_PRIVATE_KEY;
 // Validate at least one private key is provided
 if (
   !avmPrivateKey &&
+  !bsvServerPrivateKey &&
   !(ccdFacilitatorPrivateKey && ccdFacilitatorAddress) &&
   !evmPrivateKey &&
   !keetaMnemonic &&
@@ -114,13 +122,14 @@ if (
   !(hederaAccountId && hederaPrivateKey)
 ) {
   console.error(
-    "❌ At least one of AVM_PRIVATE_KEY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
+    "❌ At least one of AVM_PRIVATE_KEY, BSV_SERVER_PRIVATE_KEY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
   );
   process.exit(1);
 }
 
 // Network configuration (alphabetic order)
 const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="; // Algorand Testnet
+const BSV_NETWORK = (process.env.BSV_NETWORK || "bsv:mainnet") as Network; // BSV Mainnet
 const CCD_NETWORK = "ccd:4221332d34e1694168c2a0c0b3fd0f27"; // Concordium Testnet
 const EVM_NETWORK = "eip155:84532"; // Base Sepolia
 const HEDERA_NETWORK = "hedera:testnet"; // Hedera Testnet
@@ -156,6 +165,20 @@ if (avmPrivateKey) {
   const avmSigner = toFacilitatorAvmSigner(avmPrivateKey);
   console.info(`AVM Facilitator account: ${avmSigner.getAddresses()[0]}`);
   facilitator.register(AVM_NETWORK, new ExactAvmScheme(avmSigner));
+}
+
+// Register BSV scheme if a server wallet key is provided.
+// The facilitator settles by internalizing payments into this wallet, so it
+// must be the RECIPIENT's wallet — payTo is its identity key.
+if (bsvServerPrivateKey) {
+  const bsvWallet = await ServerWallet.create({
+    privateKey: bsvServerPrivateKey,
+    network: BSV_NETWORK === "bsv:testnet" ? "testnet" : "main",
+    storageUrl: bsvWalletStorageUrl,
+  });
+  const bsvScheme = await ExactBsvScheme.create({ wallet: bsvWallet.getClient() });
+  console.info(`BSV Facilitator identity: ${bsvScheme.getSigners(BSV_NETWORK)[0]}`);
+  facilitator.register(BSV_NETWORK, bsvScheme);
 }
 
 // Register Concordium scheme if private key + address are provided (recommended).

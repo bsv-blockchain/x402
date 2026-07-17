@@ -5,13 +5,15 @@
  * optional chain configuration via environment variables.
  *
  * New chain support should be added here in alphabetic order by network prefix
- * (e.g., "algorand" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm").
+ * (e.g., "algorand" before "bsv" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm").
  */
 
 import { config } from "dotenv";
 import express from "express";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactAvmScheme } from "@x402/avm/exact/server";
+import { ExactBsvScheme } from "@x402/bsv/exact/server";
+import { createWhatsOnChainMoneyParser } from "@x402/bsv";
 import { ExactConcordiumScheme } from "@x402/concordium/exact/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactHederaScheme } from "@x402/hedera/exact/server";
@@ -29,6 +31,8 @@ config();
 
 // Configuration - optional per network
 const avmAddress = process.env.AVM_ADDRESS as string | undefined;
+// BSV payTo is the recipient wallet's identity public key, not an address.
+const bsvIdentityKey = process.env.BSV_IDENTITY_KEY as string | undefined;
 const ccdAddress = process.env.CCD_ADDRESS as string | undefined;
 const evmAddress = process.env.EVM_ADDRESS as `0x${string}` | undefined;
 const hederaAddress = process.env.HEDERA_ACCOUNT_ID as string | undefined;
@@ -41,6 +45,7 @@ const tvmAddress = process.env.TVM_ADDRESS as string | undefined;
 // Validate at least one address is provided
 if (
   !avmAddress &&
+  !bsvIdentityKey &&
   !ccdAddress &&
   !evmAddress &&
   !svmAddress &&
@@ -51,7 +56,7 @@ if (
   !tvmAddress
 ) {
   console.error(
-    "❌ At least one of AVM_ADDRESS, CCD_ADDRESS, EVM_ADDRESS, KEETA_ADDRESS, NEAR_ADDRESS, SVM_ADDRESS, STELLAR_ADDRESS, HEDERA_ACCOUNT_ID, or TVM_ADDRESS is required",
+    "❌ At least one of AVM_ADDRESS, BSV_IDENTITY_KEY, CCD_ADDRESS, EVM_ADDRESS, KEETA_ADDRESS, NEAR_ADDRESS, SVM_ADDRESS, STELLAR_ADDRESS, HEDERA_ACCOUNT_ID, or TVM_ADDRESS is required",
   );
   process.exit(1);
 }
@@ -64,6 +69,7 @@ if (!facilitatorUrl) {
 
 // Network configuration
 const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=" as const; // Algorand Testnet
+const BSV_NETWORK = (process.env.BSV_NETWORK || "bsv:mainnet") as Network; // BSV Mainnet
 const CCD_NETWORK = "ccd:4221332d34e1694168c2a0c0b3fd0f27" as const; // Concordium Testnet
 const EVM_NETWORK = "eip155:84532" as const; // Base Sepolia
 const HEDERA_NETWORK = "hedera:testnet" as const; // Hedera Testnet
@@ -89,6 +95,14 @@ if (avmAddress) {
     price: "$0.001",
     network: AVM_NETWORK,
     payTo: avmAddress,
+  });
+}
+if (bsvIdentityKey) {
+  accepts.push({
+    scheme: "exact",
+    price: "$0.001", // converted to satoshis via the WhatsOnChain rate feed
+    network: BSV_NETWORK,
+    payTo: bsvIdentityKey,
   });
 }
 if (ccdAddress) {
@@ -169,6 +183,12 @@ const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
 const server = new x402ResourceServer(facilitatorClient);
 if (avmAddress) {
   server.register(AVM_NETWORK, new ExactAvmScheme());
+}
+if (bsvIdentityKey) {
+  server.register(
+    BSV_NETWORK,
+    new ExactBsvScheme().registerMoneyParser(createWhatsOnChainMoneyParser()),
+  );
 }
 if (ccdAddress) {
   server.register(CCD_NETWORK, new ExactConcordiumScheme());

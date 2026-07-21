@@ -33,6 +33,12 @@ export const MAX_SATOSHIS = 2_100_000_000_000_000;
 export const BRC29_PROTOCOL_ID: WalletProtocol = [2, "3241645161d8"];
 
 /**
+ * Minimum number of bytes for the BRC-29 derivation prefix (the payment
+ * nonce). BRC-121 mandates a fresh random prefix of at least 8 bytes.
+ */
+export const MIN_DERIVATION_PREFIX_BYTES = 8;
+
+/**
  * Default payment freshness window in milliseconds (BRC-121: ±30 seconds).
  * The timestamp encoded in the payload's `derivationSuffix` must be within
  * this window of the verifier's clock.

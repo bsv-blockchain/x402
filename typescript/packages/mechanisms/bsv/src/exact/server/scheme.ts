@@ -7,7 +7,7 @@ import type {
   SchemeNetworkServer,
 } from "@x402/core/types";
 import { parseMoneyString } from "@x402/core/utils";
-import { BSV_ASSET_IDENTIFIER, BSV_DECIMALS } from "../../constants";
+import { BSV_ASSET_IDENTIFIER, BSV_DECIMALS, MAX_SATOSHIS } from "../../constants";
 
 /**
  * BSV server scheme for exact payments.
@@ -75,6 +75,7 @@ export class ExactBsvScheme implements SchemeNetworkServer {
             `the BSV exact scheme transfers native ${BSV_ASSET_IDENTIFIER} (satoshis) only`,
         );
       }
+      this.assertSatoshiAmount(price.amount, network);
       return {
         amount: price.amount,
         asset: price.asset,
@@ -158,5 +159,27 @@ export class ExactBsvScheme implements SchemeNetworkServer {
   private parseMoneyToDecimal(money: string | number): number {
     if (typeof money === "number") return money;
     return parseMoneyString(money);
+  }
+
+  /**
+   * Validates an explicit satoshi amount is a positive integer within the
+   * representable supply, so malformed amounts fail at parse time rather
+   * than shipping in a 402 challenge.
+   *
+   * @param amount - The atomic-unit amount string
+   * @param network - Network identifier (for the error message)
+   */
+  private assertSatoshiAmount(amount: string, network: Network): void {
+    if (!/^\d+$/.test(amount)) {
+      throw new Error(
+        `Invalid BSV amount "${amount}" on network ${network}: must be a positive integer number of satoshis`,
+      );
+    }
+    const satoshis = BigInt(amount);
+    if (satoshis <= 0n || satoshis > BigInt(MAX_SATOSHIS)) {
+      throw new Error(
+        `BSV amount "${amount}" on network ${network} is out of range (1..${MAX_SATOSHIS} satoshis)`,
+      );
+    }
   }
 }

@@ -11,12 +11,14 @@ import type {
 import type { ExactBsvPayloadV2 } from "../../types";
 import {
   BRC29_PROTOCOL_ID,
+  BSV_ASSET_IDENTIFIER,
   BSV_MAINNET_CAIP2,
   BSV_TESTNET_CAIP2,
   BSV_WILDCARD_CAIP2,
   COMPRESSED_PUBKEY_REGEX,
   DEFAULT_PAYMENT_WINDOW_MS,
   MAX_SATOSHIS,
+  MIN_DERIVATION_PREFIX_BYTES,
   isBsvNetwork,
 } from "../../constants";
 
@@ -45,10 +47,29 @@ export interface ExactBsvSchemeConfig {
    * @default 30000
    */
   paymentWindowMs?: number;
+
+  /**
+   * Optional SPV pre-check run during `verify` (not `settle`). Because the
+   * base `verify` performs only structural/derivation checks — the wallet's
+   * SPV validation happens at `settle` — a structurally valid but unfunded
+   * or invalid BEEF can force a resource handler to run before settlement
+   * rejects it. Supply this to SPV-validate the BEEF at verify time and
+   * close that DoS surface. Return `true` if the transaction is SPV-valid.
+   */
+  spvOnVerify?: (beefBytes: number[], subjectTxid: string) => Promise<boolean>;
 }
 
-/** How long settled txids are remembered for duplicate-settlement defense */
-const SETTLEMENT_CACHE_TTL_MS = 600_000;
+/**
+ * Floor for how long settled txids are remembered for duplicate-settlement
+ * defense. The effective TTL per payment is at least the settlement
+ * freshness window (paymentWindow + maxTimeoutSeconds) plus a margin, so a
+ * replay can never outlive the window during which re-verification would
+ * still accept it.
+ */
+const SETTLEMENT_CACHE_TTL_FLOOR_MS = 600_000;
+
+/** Margin added on top of the settlement window when sizing the dedup TTL */
+const SETTLEMENT_CACHE_TTL_MARGIN_MS = 60_000;
 
 /**
  * BSV facilitator implementation for the `exact` payment scheme.
@@ -70,6 +91,13 @@ const SETTLEMENT_CACHE_TTL_MS = 600_000;
  * window. `isMerge` alone is not a replay: self-payments (same wallet
  * creates and internalizes) report `isMerge: true` with newly internalized
  * satoshis on first settle.
+ *
+ * The dedup cache is process-local (an in-memory Map). Operators running
+ * multiple facilitator instances (or restarting between settle attempts)
+ * MUST route a given payment to a consistent instance (sticky sessions) or
+ * rely on the wallet's own transaction-uniqueness, since a fresh instance
+ * cannot see another's cache. A shared/persistent store is out of scope
+ * here.
  */
 export class ExactBsvScheme implements SchemeNetworkFacilitator {
   readonly scheme = "exact";
@@ -78,6 +106,7 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
   private readonly wallet: WalletInterface;
   private readonly identityKey: string;
   private readonly paymentWindowMs: number;
+  private readonly spvOnVerify?: (beefBytes: number[], subjectTxid: string) => Promise<boolean>;
   private walletNetworkPromise: Promise<string> | undefined;
   private readonly settledTxids = new Map<string, number>();
 
@@ -95,6 +124,7 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
     this.wallet = config.wallet;
     this.identityKey = config.identityKey.toLowerCase();
     this.paymentWindowMs = config.paymentWindowMs ?? DEFAULT_PAYMENT_WINDOW_MS;
+    this.spvOnVerify = config.spvOnVerify;
   }
 
   /**
@@ -184,8 +214,8 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
       return this.failure(network, payer, "duplicate_settlement");
     }
     // Mark before internalizing so a concurrent duplicate /settle call is
-    // rejected instead of racing the wallet; rolled back on wallet error.
-    this.markSettled(txid);
+    // rejected instead of racing the wallet; rolled back if nothing settles.
+    this.markSettled(txid, requirements);
 
     let result: { accepted: boolean; isMerge?: boolean; satoshis?: number };
     try {
@@ -220,10 +250,15 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
     // no-op replay (satoshis === 0 or omitted).
     const newlyInternalized = typeof result.satoshis === "number" && result.satoshis > 0;
     if (result.isMerge && !newlyInternalized) {
+      // Genuine replay: the wallet already held this tx and internalized
+      // nothing new. Keep the dedup mark — it was legitimately settled before.
       return this.failure(network, payer, "duplicate_settlement");
     }
 
     if (!result.accepted) {
+      // Soft rejection — nothing was internalized. Roll back the mark so a
+      // later retry of the same BEEF is not falsely reported as a duplicate.
+      this.settledTxids.delete(txid);
       return this.failure(network, payer, "settlement_rejected_by_wallet");
     }
 
@@ -258,6 +293,11 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
 
     if (!isBsvNetwork(requirements.network)) {
       return { payer: "", error: "invalid_network" };
+    }
+
+    const asset = requirements.asset ?? BSV_ASSET_IDENTIFIER;
+    if (asset !== "" && asset.toUpperCase() !== BSV_ASSET_IDENTIFIER) {
+      return { payer: "", error: "invalid_exact_bsv_payload_asset" };
     }
 
     const parsed = this.parsePayload(payload.payload);
@@ -328,6 +368,20 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
     const destinationError = await this.checkDestination(parsed, p2pkhMatch[1]);
     if (destinationError !== null) {
       return { payer, error: destinationError };
+    }
+
+    // Optional SPV pre-check at verify time only (settle's internalizeAction
+    // performs the authoritative SPV validation regardless).
+    if (phase === "verify" && this.spvOnVerify) {
+      let spvValid: boolean;
+      try {
+        spvValid = await this.spvOnVerify(beefArr, txid);
+      } catch {
+        return { payer, error: "invalid_exact_bsv_payload_spv" };
+      }
+      if (!spvValid) {
+        return { payer, error: "invalid_exact_bsv_payload_spv" };
+      }
     }
 
     return { payer, context: { parsed, beefArr, txid } };
@@ -447,6 +501,19 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
       return "invalid_exact_bsv_payload_format";
     }
 
+    // BRC-29 requires the derivation prefix to be a fresh random nonce; the
+    // spec sets a minimum of 8 bytes. Decode and enforce the length so a
+    // low-entropy prefix cannot weaken per-payment key uniqueness.
+    let prefixBytes: number[];
+    try {
+      prefixBytes = Utils.toArray(derivationPrefix, "base64");
+    } catch {
+      return "invalid_exact_bsv_payload_derivation_prefix";
+    }
+    if (prefixBytes.length < MIN_DERIVATION_PREFIX_BYTES) {
+      return "invalid_exact_bsv_payload_derivation_prefix";
+    }
+
     return { transaction, derivationPrefix, derivationSuffix, senderIdentityKey, outputIndex };
   }
 
@@ -522,10 +589,23 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
   /**
    * Records a txid in the duplicate-settlement cache.
    *
+   * The TTL covers the full settlement freshness window
+   * (`paymentWindowMs + maxTimeoutSeconds`) plus a margin — the period over
+   * which a replay could still pass re-verification — with a fixed floor.
+   * This prevents a replay from surviving cache expiry while still being
+   * re-verifiable when `maxTimeoutSeconds` is large.
+   *
    * @param txid - Subject transaction id
+   * @param requirements - Payment requirements carrying maxTimeoutSeconds
    */
-  private markSettled(txid: string): void {
-    this.settledTxids.set(txid, Date.now() + SETTLEMENT_CACHE_TTL_MS);
+  private markSettled(txid: string, requirements: PaymentRequirements): void {
+    const settleBudgetMs =
+      Number.isFinite(requirements.maxTimeoutSeconds) && requirements.maxTimeoutSeconds > 0
+        ? requirements.maxTimeoutSeconds * 1000
+        : 0;
+    const windowMs = this.paymentWindowMs + settleBudgetMs + SETTLEMENT_CACHE_TTL_MARGIN_MS;
+    const ttl = Math.max(SETTLEMENT_CACHE_TTL_FLOOR_MS, windowMs);
+    this.settledTxids.set(txid, Date.now() + ttl);
   }
 
   /**

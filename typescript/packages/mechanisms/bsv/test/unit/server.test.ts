@@ -44,6 +44,25 @@ describe("ExactBsvScheme (server)", () => {
       ).rejects.toThrow(/asset/i);
     });
 
+    it.each(["1.5", "0", "-1", "abc", "2100000000000001"])(
+      "throws for an invalid satoshi amount %j",
+      async amount => {
+        const scheme = new ExactBsvScheme();
+        await expect(
+          scheme.parsePrice({ amount, asset: "BSV" }, BSV_TESTNET_CAIP2),
+        ).rejects.toThrow(/amount|range/i);
+      },
+    );
+
+    it("accepts the maximum representable satoshi amount", async () => {
+      const scheme = new ExactBsvScheme();
+      const result = await scheme.parsePrice(
+        { amount: "2100000000000000", asset: "BSV" },
+        BSV_TESTNET_CAIP2,
+      );
+      expect(result.amount).toBe("2100000000000000");
+    });
+
     it("throws for Money when no parser is registered", async () => {
       const scheme = new ExactBsvScheme();
       await expect(scheme.parsePrice("$0.10", BSV_TESTNET_CAIP2)).rejects.toThrow(

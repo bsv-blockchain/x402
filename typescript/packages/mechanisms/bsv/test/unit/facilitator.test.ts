@@ -460,6 +460,72 @@ describe("ExactBsvScheme (facilitator)", () => {
       await scheme.verify(makePayload(makeBsvPayload(beefBase64)), makeRequirements());
       expect(wallet.internalizeAction).not.toHaveBeenCalled();
     });
+
+    it("rejects a non-BSV requirements asset", async () => {
+      const { scheme } = makeScheme();
+      const { beefBase64 } = makeBeef(1000);
+      const requirements = makeRequirements({ asset: "USDC" });
+      const result = await scheme.verify(
+        makePayload(makeBsvPayload(beefBase64), requirements),
+        requirements,
+      );
+      expect(result.invalidReason).toBe("invalid_exact_bsv_payload_asset");
+    });
+
+    it("rejects a derivation prefix shorter than 8 bytes", async () => {
+      const { scheme } = makeScheme();
+      const { beefBase64 } = makeBeef(1000);
+      const payload = makeBsvPayload(beefBase64, {
+        derivationPrefix: Utils.toBase64([1, 2, 3]),
+      });
+      const result = await scheme.verify(makePayload(payload), makeRequirements());
+      expect(result.invalidReason).toBe("invalid_exact_bsv_payload_derivation_prefix");
+    });
+
+    describe("spvOnVerify", () => {
+      it("passes the BEEF and txid to the SPV callback and accepts when it returns true", async () => {
+        const wallet = makeWallet();
+        const spv = vi.fn().mockResolvedValue(true);
+        const scheme = new ExactBsvScheme({ wallet, identityKey: IDENTITY_KEY, spvOnVerify: spv });
+        const { beefBase64, txid } = makeBeef(1000);
+        const result = await scheme.verify(
+          makePayload(makeBsvPayload(beefBase64)),
+          makeRequirements(),
+        );
+        expect(result.isValid).toBe(true);
+        expect(spv).toHaveBeenCalledWith(Utils.toArray(beefBase64, "base64"), txid);
+      });
+
+      it("rejects when the SPV callback returns false", async () => {
+        const wallet = makeWallet();
+        const scheme = new ExactBsvScheme({
+          wallet,
+          identityKey: IDENTITY_KEY,
+          spvOnVerify: vi.fn().mockResolvedValue(false),
+        });
+        const { beefBase64 } = makeBeef(1000);
+        const result = await scheme.verify(
+          makePayload(makeBsvPayload(beefBase64)),
+          makeRequirements(),
+        );
+        expect(result.invalidReason).toBe("invalid_exact_bsv_payload_spv");
+      });
+
+      it("rejects when the SPV callback throws", async () => {
+        const wallet = makeWallet();
+        const scheme = new ExactBsvScheme({
+          wallet,
+          identityKey: IDENTITY_KEY,
+          spvOnVerify: vi.fn().mockRejectedValue(new Error("headers unavailable")),
+        });
+        const { beefBase64 } = makeBeef(1000);
+        const result = await scheme.verify(
+          makePayload(makeBsvPayload(beefBase64)),
+          makeRequirements(),
+        );
+        expect(result.invalidReason).toBe("invalid_exact_bsv_payload_spv");
+      });
+    });
   });
 
   describe("settle", () => {
@@ -600,6 +666,73 @@ describe("ExactBsvScheme (facilitator)", () => {
       );
       expect(result.success).toBe(false);
       expect(result.errorReason).toBe("settlement_rejected_by_wallet");
+    });
+
+    it("allows retry after a soft rejection (accepted: false rolls back the dedup mark)", async () => {
+      const wallet = makeWallet();
+      vi.mocked(wallet.internalizeAction).mockResolvedValueOnce({
+        accepted: false,
+        isMerge: false,
+      });
+      const scheme = new ExactBsvScheme({ wallet, identityKey: IDENTITY_KEY });
+      const { beefBase64, txid } = makeBeef(1000);
+      const payload = makePayload(makeBsvPayload(beefBase64));
+
+      const first = await scheme.settle(payload, makeRequirements());
+      expect(first.success).toBe(false);
+      expect(first.errorReason).toBe("settlement_rejected_by_wallet");
+
+      // A retry of the same BEEF must not be falsely reported as a duplicate.
+      const second = await scheme.settle(payload, makeRequirements());
+      expect(second.success).toBe(true);
+      expect(second.transaction).toBe(txid);
+      expect(wallet.internalizeAction).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not run the SPV callback at settle time", async () => {
+      const wallet = makeWallet();
+      const spv = vi.fn().mockResolvedValue(true);
+      const scheme = new ExactBsvScheme({ wallet, identityKey: IDENTITY_KEY, spvOnVerify: spv });
+      const { beefBase64 } = makeBeef(1000);
+      const result = await scheme.settle(
+        makePayload(makeBsvPayload(beefBase64)),
+        makeRequirements(),
+      );
+      expect(result.success).toBe(true);
+      expect(spv).not.toHaveBeenCalled();
+    });
+
+    it("serializes concurrent double-settle: one succeeds, one is a duplicate", async () => {
+      const { scheme, wallet } = makeScheme();
+      const { beefBase64 } = makeBeef(1000);
+      const payload = makePayload(makeBsvPayload(beefBase64));
+
+      const [a, b] = await Promise.all([
+        scheme.settle(payload, makeRequirements()),
+        scheme.settle(payload, makeRequirements()),
+      ]);
+
+      expect([a, b].filter(r => r.success)).toHaveLength(1);
+      expect([a, b].filter(r => r.errorReason === "duplicate_settlement")).toHaveLength(1);
+      expect(wallet.internalizeAction).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the dedup mark past the fixed floor when maxTimeoutSeconds is large", async () => {
+      const { scheme, wallet } = makeScheme();
+      const { beefBase64 } = makeBeef(1000);
+      const requirements = makeRequirements({ maxTimeoutSeconds: 3600 }); // 1h settle budget
+      const payload = makePayload(makeBsvPayload(beefBase64), requirements);
+
+      const first = await scheme.settle(payload, requirements);
+      expect(first.success).toBe(true);
+
+      // Past the 600s fixed floor, but still inside the settlement window —
+      // a fixed TTL would have let this replay through; the dynamic TTL holds.
+      vi.advanceTimersByTime(700_000);
+      const second = await scheme.settle(payload, requirements);
+      expect(second.success).toBe(false);
+      expect(second.errorReason).toBe("duplicate_settlement");
+      expect(wallet.internalizeAction).toHaveBeenCalledTimes(1);
     });
   });
 });

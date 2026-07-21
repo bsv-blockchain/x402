@@ -9,6 +9,7 @@ import {
   COMPRESSED_PUBKEY_REGEX,
   DEFAULT_PAYMENT_WINDOW_MS,
   MAX_SATOSHIS,
+  MIN_DERIVATION_PREFIX_BYTES,
   getExplorerTxUrl,
   isBsvNetwork,
 } from "../../src/constants";
@@ -32,6 +33,10 @@ describe("constants", () => {
 
   it("defaults the BRC-121 payment window to 30 seconds", () => {
     expect(DEFAULT_PAYMENT_WINDOW_MS).toBe(30_000);
+  });
+
+  it("requires the BRC-29 derivation prefix to be at least 8 bytes", () => {
+    expect(MIN_DERIVATION_PREFIX_BYTES).toBe(8);
   });
 
   it("recognizes BSV networks only", () => {

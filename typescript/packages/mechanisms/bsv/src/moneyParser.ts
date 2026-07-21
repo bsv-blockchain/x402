@@ -152,7 +152,9 @@ export function createWhatsOnChainMoneyParser(
     const usdPerBsv = await getRate(url);
 
     // Satoshis, clamped to a 1-satoshi floor so sub-dust dollar prices
-    // still produce a payable amount.
+    // still produce a payable amount. This uses IEEE-754 float arithmetic,
+    // which is exact enough for the per-request micro-payments x402 targets;
+    // for large fiat amounts a fixed-point conversion would be preferable.
     const satoshis = Math.max(1, Math.round((usd / usdPerBsv) * 10 ** BSV_DECIMALS));
     if (satoshis > MAX_SATOSHIS) {
       throw new Error(`Price ${usd} USD exceeds the maximum representable satoshi amount`);

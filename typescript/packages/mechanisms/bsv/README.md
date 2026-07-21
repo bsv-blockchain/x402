@@ -110,8 +110,12 @@ const wallet = await ServerWallet.create({
 
 const scheme = await ExactBsvScheme.create({ wallet: wallet.getClient() });
 
+// Register ONLY the network the wallet operates on. A scheme instance wraps a
+// single wallet, and `verify`/`settle` reject any network that doesn't match
+// the wallet's own `getNetwork()` (`invalid_network`). For both networks, build
+// a second wallet + scheme on testnet and register that separately.
 const facilitator = new x402Facilitator();
-facilitator.register(["bsv:mainnet", "bsv:testnet"], scheme);
+facilitator.register("bsv:mainnet", scheme);
 ```
 
 ## Security Notes

@@ -37,13 +37,15 @@ Amounts are denominated in satoshis. There is no default USD conversion; use an 
 
 ## Networks
 
-| Network  | Identifier    |
-| -------- | ------------- |
-| Mainnet  | `bsv:mainnet` |
-| Testnet  | `bsv:testnet` |
-| Wildcard | `bsv:*`       |
+| Network                         | Identifier    |
+| ------------------------------- | ------------- |
+| Mainnet                         | `bsv:mainnet` |
+| Testnet                         | `bsv:testnet` |
+| Teranode Test Net (Teratestnet) | `bsv:ttn`     |
+| Teranode Scaling Test Net       | `bsv:tstn`    |
+| Wildcard                        | `bsv:*`       |
 
-BSV has no ChainAgnostic CAIP-2 registry entry, and `bip122` genesis references are ambiguous for BSV (shared genesis with BTC), so this package defines the dedicated `bsv` namespace.
+Network identifiers follow the ChainAgnostic `bsv` namespace ([registration](https://github.com/ChainAgnostic/namespaces/pull/190)). `bip122` genesis references are ambiguous for BSV (shared genesis with BTC/BCH); this package refuses them rather than defaulting to BSV.
 
 ## Usage
 
@@ -112,8 +114,8 @@ const scheme = await ExactBsvScheme.create({ wallet: wallet.getClient() });
 
 // Register ONLY the network the wallet operates on. A scheme instance wraps a
 // single wallet, and `verify`/`settle` reject any network that doesn't match
-// the wallet's own `getNetwork()` (`invalid_network`). For both networks, build
-// a second wallet + scheme on testnet and register that separately.
+// the wallet's own `getNetwork()` (`invalid_network`). For multiple networks
+// (mainnet / testnet / ttn / tstn), build a separate wallet + scheme per network.
 const facilitator = new x402Facilitator();
 facilitator.register("bsv:mainnet", scheme);
 ```

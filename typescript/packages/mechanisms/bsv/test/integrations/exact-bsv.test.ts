@@ -3,7 +3,8 @@ import { Beef, PublicKey, WalletClient, Utils } from "@bsv/sdk";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { ExactBsvScheme as ExactBsvClient } from "../../src/exact/client/scheme";
 import { ExactBsvScheme as ExactBsvFacilitator } from "../../src/exact/facilitator/scheme";
-import { BRC29_PROTOCOL_ID, BSV_MAINNET_CAIP2, BSV_TESTNET_CAIP2 } from "../../src/constants";
+import { BRC29_PROTOCOL_ID, BSV_MAINNET_CAIP2, isBsvNetwork } from "../../src/constants";
+import type { Network } from "@x402/core/types";
 import type { ExactBsvPayloadV2 } from "../../src/types";
 
 /**
@@ -13,8 +14,8 @@ import type { ExactBsvPayloadV2 } from "../../src/types";
  * - BSV_INTEGRATION=true
  * - A running BRC-100 wallet reachable by WalletClient, holding a small
  *   spendable balance.
- * - Optional BSV_NETWORK (bsv:mainnet | bsv:testnet) matching the wallet's
- *   chain; defaults to bsv:mainnet.
+ * - Optional BSV_NETWORK (bsv:mainnet | bsv:testnet | bsv:ttn | bsv:tstn)
+ *   matching the wallet's chain; defaults to bsv:mainnet.
  * - Optional BSV_ORIGINATOR for the Node HTTP wallet substrate Origin header
  *   (defaults to x402-integration.test). Required outside the browser.
  * - Optional BSV_RECIPIENT_IDENTITY_KEY for the cross-wallet payment test
@@ -27,7 +28,8 @@ if (process.env.BSV_INTEGRATION !== "true") {
   );
 }
 
-const NETWORK = process.env.BSV_NETWORK === "bsv:testnet" ? BSV_TESTNET_CAIP2 : BSV_MAINNET_CAIP2;
+const envNetwork = (process.env.BSV_NETWORK ?? BSV_MAINNET_CAIP2) as Network;
+const NETWORK: Network = isBsvNetwork(envNetwork) ? envNetwork : BSV_MAINNET_CAIP2;
 const ORIGINATOR = process.env.BSV_ORIGINATOR ?? "x402-integration.test";
 const PAYMENT_SATOSHIS = "5";
 /** External recipient identity key for the cross-wallet payment test. */

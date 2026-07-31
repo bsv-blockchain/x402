@@ -208,9 +208,26 @@ if (aptosPrivateKey) {
 // The facilitator settles by internalizing payments into this wallet, so it
 // must be the RECIPIENT's wallet — payTo is its identity key.
 if (bsvServerPrivateKey) {
+  // Map CAIP-2 (bsv:*) to ServerWallet network names. Refuse unknown ids —
+  // do not default bip122/genesis references to BSV.
+  const bsvWalletNetwork =
+    BSV_NETWORK === "bsv:mainnet"
+      ? "main"
+      : BSV_NETWORK === "bsv:testnet"
+        ? "testnet"
+        : BSV_NETWORK === "bsv:ttn"
+          ? "ttn"
+          : BSV_NETWORK === "bsv:tstn"
+            ? "tstn"
+            : undefined;
+  if (!bsvWalletNetwork) {
+    throw new Error(
+      `Unsupported BSV_NETWORK=${BSV_NETWORK}; use bsv:mainnet|bsv:testnet|bsv:ttn|bsv:tstn`,
+    );
+  }
   const bsvWallet = await ServerWallet.create({
     privateKey: bsvServerPrivateKey,
-    network: BSV_NETWORK === "bsv:testnet" ? "testnet" : "main",
+    network: bsvWalletNetwork,
     storageUrl: bsvWalletStorageUrl,
   });
   const bsvScheme = await ExactBsvScheme.create({ wallet: bsvWallet.getClient() });

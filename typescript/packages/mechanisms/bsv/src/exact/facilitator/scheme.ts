@@ -12,8 +12,7 @@ import type { ExactBsvPayloadV2 } from "../../types";
 import {
   BRC29_PROTOCOL_ID,
   BSV_ASSET_IDENTIFIER,
-  BSV_MAINNET_CAIP2,
-  BSV_TESTNET_CAIP2,
+  toBsvWalletNetwork,
   BSV_WILDCARD_CAIP2,
   COMPRESSED_PUBKEY_REGEX,
   DEFAULT_PAYMENT_WINDOW_MS,
@@ -452,8 +451,7 @@ export class ExactBsvScheme implements SchemeNetworkFacilitator {
    * @returns An invalidReason string, or null when the chains agree
    */
   private async checkWalletNetwork(network: Network): Promise<string | null> {
-    const expected =
-      network === BSV_MAINNET_CAIP2 ? "mainnet" : network === BSV_TESTNET_CAIP2 ? "testnet" : "";
+    const expected = toBsvWalletNetwork(network);
     if (!expected) {
       return "invalid_network";
     }

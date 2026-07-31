@@ -9,7 +9,7 @@ This package implements ERC-8021 **Schema 2** (CBOR-encoded). See the [protocol 
 ## How it works
 
 1. **Servers** declare their app code (`a`) in the 402 `PaymentRequired.extensions`.
-2. **Clients** echo the server's `a` and attach their own service code(s) (`s`) to `PaymentPayload.extensions`.
+2. **Clients** attach their own service code(s) (`s`) to `PaymentPayload.extensions` whenever `BuilderCodeClientExtension` is registered. When the server declared `builder-code`, the core client merge also preserves the server's `a`.
 3. **Facilitators** add their wallet code (`w`) at settlement, CBOR-encode the combined fields, and append the ERC-8021 suffix to the settlement calldata.
 
 All codes must match `^[a-z0-9_]{1,32}$` (1-32 characters, lowercase alphanumeric and underscores). Invalid codes raise at construction/declaration time.
@@ -38,7 +38,7 @@ client.register_extension(BuilderCodeClientExtension("bc_my_client"))
 client.register_extension(BuilderCodeClientExtension(["bc_mcp", "bc_demo_app"]))
 ```
 
-The client never sets `w` — that is added by the facilitator. The core client merge preserves the server-declared `a` and schema after enrichment.
+The client never sets `w` — that is added by the facilitator. When the server declared `builder-code` in the 402 response, the core client merge preserves the server-declared `a` and schema after enrichment. When the server did not declare `builder-code`, only `s` is attached.
 
 ## For facilitators
 
@@ -47,12 +47,12 @@ Register the facilitator extension to encode the ERC-8021 suffix at settlement. 
 ```python
 from x402.extensions.builder_code import BuilderCodeFacilitatorExtension
 
-facilitator.register_extension(
-    BuilderCodeFacilitatorExtension(builder_code="bc_my_facilitator")
-)
+facilitator.register_extension(BuilderCodeFacilitatorExtension(builder_code="bc_my_facilitator"))
 ```
 
 At settlement the extension reads `a` and `s` from the client payment payload, adds its configured `w`, CBOR-encodes the present fields, and returns the hex suffix for the settlement mechanism to append to calldata. It returns `None` when no attribution is present.
+
+Facilitators SHOULD truncate `s` to the first 5 valid entries at settlement to bound calldata size.
 
 ## Parsing attribution from calldata
 
@@ -89,6 +89,7 @@ Low-level CBOR helpers to encode a `BuilderCodeExtensionData` into an ERC-8021 s
 
 - `BUILDER_CODE` — extension identifier (`"builder-code"`)
 - `BUILDER_CODE_PATTERN` — `^[a-z0-9_]{1,32}$`
+- `MAX_SERVICE_CODES` — `5` (on-chain cap for `s`; facilitators truncate excess entries)
 - `ERC_8021_MARKER`, `SCHEMA_2_ID`, `BUILDER_CODE_SCHEMA`
 - Types: `BuilderCodeExtensionData`, `BuilderCodeFacilitatorConfig`
 

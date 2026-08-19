@@ -2,6 +2,7 @@ import type {
   AssetAmount,
   MoneyParser,
   Network,
+  PaymentFlowConfig,
   PaymentRequirements,
   Price,
   SchemeNetworkServer,
@@ -22,6 +23,10 @@ import { BSV_ASSET_IDENTIFIER, BSV_DECIMALS, MAX_SATOSHIS } from "../../constant
  */
 export class ExactBsvScheme implements SchemeNetworkServer {
   readonly scheme = "exact";
+  readonly defaultAssetTransferMethod = "default";
+  readonly paymentFlows = {
+    default: { supported: ["authorization"], default: "authorization" },
+  } as const satisfies Record<string, PaymentFlowConfig>;
 
   /** Custom money parser chain — tried in registration order */
   private moneyParsers: MoneyParser[] = [];
@@ -158,7 +163,7 @@ export class ExactBsvScheme implements SchemeNetworkServer {
    */
   private parseMoneyToDecimal(money: string | number): number {
     if (typeof money === "number") return money;
-    return parseMoneyString(money);
+    return Number(parseMoneyString(money));
   }
 
   /**

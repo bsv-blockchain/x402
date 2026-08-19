@@ -134,13 +134,14 @@ export function createWhatsOnChainMoneyParser(
     }
   }
 
-  return async (usd: number, network: Network) => {
+  return async (amount: string | number, network: Network) => {
     if (!isBsvNetwork(network)) {
       return null;
     }
 
+    const usd = typeof amount === "number" ? amount : Number(amount);
     if (!Number.isFinite(usd) || usd <= 0) {
-      throw new Error(`Price amount must be a positive number of dollars, got ${String(usd)}`);
+      throw new Error(`Price amount must be a positive number of dollars, got ${String(amount)}`);
     }
 
     const url =

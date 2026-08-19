@@ -147,7 +147,7 @@ if (
 const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe"; // Algorand Testnet
 const APTOS_NETWORK = (process.env.APTOS_NETWORK || "aptos:2") as Network; // Aptos Testnet
 const BSV_NETWORK = (process.env.BSV_NETWORK || "bsv:mainnet") as Network; // BSV Mainnet
-const CCD_NETWORK = "ccd:4221332d34e1694168c2a0c0b3fd0f27"; // Concordium Testnet
+const CCD_NETWORK = CONCORDIUM_TESTNET_CAIP2; // Concordium Testnet
 const EVM_NETWORK = "eip155:84532"; // Base Sepolia
 const HEDERA_NETWORK = "hedera:testnet"; // Hedera Testnet
 const KEETA_NETWORK = KEETA_TESTNET_CAIP2; // Keeta Testnet

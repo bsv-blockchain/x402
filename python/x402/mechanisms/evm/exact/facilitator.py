@@ -25,6 +25,7 @@ from ..constants import (
     ERR_SMART_WALLET_DEPLOYMENT_FAILED,
     ERR_TRANSACTION_FAILED,
     ERR_TRANSACTION_SIMULATION_FAILED,
+    ERR_TRANSFER_EVENT_MISMATCH,
     ERR_UNDEPLOYED_SMART_WALLET,
     ERR_UNSUPPORTED_SCHEME,
     ERR_VALID_AFTER_FUTURE,
@@ -41,10 +42,17 @@ from ..exact.eip3009_utils import (
     parse_eip3009_authorization,
     parse_eip3009_transfer_error,
     simulate_eip3009_transfer_result,
+    verify_eip3009_transfer_event,
 )
 from ..exact.permit2_utils import settle_permit2, verify_permit2
+from ..settle_receipt import wait_for_receipt_and_build_response
 from ..signer import FacilitatorEvmSigner
-from ..types import ERC6492SignatureData, ExactEIP3009Payload, is_permit2_payload
+from ..types import (
+    ERC6492SignatureData,
+    ExactEIP3009Payload,
+    TransactionReceipt,
+    is_permit2_payload,
+)
 from ..utils import (
     bytes_to_hex,
     get_evm_chain_id,
@@ -437,21 +445,31 @@ class ExactEvmScheme:
                 sig_data,
                 data_suffix=data_suffix,
             )
-            receipt = self._signer.wait_for_transaction_receipt(tx_hash)
-            if receipt.status != TX_STATUS_SUCCESS:
-                return SettleResponse(
-                    success=False,
-                    error_reason=ERR_TRANSACTION_FAILED,
-                    transaction=tx_hash,
-                    network=network,
-                    payer=payer,
-                )
 
-            return SettleResponse(
-                success=True,
-                transaction=tx_hash,
-                network=network,
-                payer=payer,
+            def _validate_transfer(receipt: TransactionReceipt) -> SettleResponse | None:
+                if receipt.logs is not None and not verify_eip3009_transfer_event(
+                    receipt.logs,
+                    token_address,
+                    from_address=parsed_authorization.from_address,
+                    to=parsed_authorization.to,
+                    value=parsed_authorization.value,
+                ):
+                    return SettleResponse(
+                        success=False,
+                        error_reason=ERR_TRANSFER_EVENT_MISMATCH,
+                        transaction=tx_hash,
+                        network=network,
+                        payer=payer,
+                    )
+                return None
+
+            return wait_for_receipt_and_build_response(
+                self._signer,
+                tx_hash,
+                network,
+                payer,
+                failed_reason=ERR_TRANSACTION_FAILED,
+                validate_receipt=_validate_transfer,
             )
 
         except Exception as e:

@@ -337,10 +337,13 @@ ERR_FAILED_TO_GET_NETWORK_CONFIG = "invalid_exact_evm_failed_to_get_network_conf
 ERR_FAILED_TO_GET_ASSET_INFO = "invalid_exact_evm_failed_to_get_asset_info"
 ERR_FAILED_TO_VERIFY_SIGNATURE = "invalid_exact_evm_failed_to_verify_signature"
 ERR_TRANSACTION_FAILED = "transaction_failed"
+# Broadcast succeeded; receipt wait failed (RPC/timeout). Non-terminal — return with tx hash.
+ERR_SETTLEMENT_PENDING = "settlement_pending"
 ERR_TOKEN_NAME_MISMATCH = "invalid_exact_evm_token_name_mismatch"
 ERR_TOKEN_VERSION_MISMATCH = "invalid_exact_evm_token_version_mismatch"
 ERR_EIP3009_NOT_SUPPORTED = "invalid_exact_evm_eip3009_not_supported"
 ERR_TRANSACTION_SIMULATION_FAILED = "invalid_exact_evm_transaction_simulation_failed"
+ERR_TRANSFER_EVENT_MISMATCH = "invalid_exact_evm_transfer_event_mismatch"
 
 # Permit2-specific error codes
 ERR_PERMIT2_INVALID_SPENDER = "invalid_permit2_spender"
@@ -364,6 +367,7 @@ ERR_UPTO_AMOUNT_EXCEEDS_PERMITTED = "upto_amount_exceeds_permitted"
 ERR_UPTO_UNAUTHORIZED_FACILITATOR = "upto_unauthorized_facilitator"
 ERR_UPTO_TRANSACTION_FAILED = "invalid_upto_evm_transaction_failed"
 ERR_UPTO_FAILED_TO_GET_NETWORK_CONFIG = "invalid_upto_evm_failed_to_get_network_config"
+ERR_ERC20_APPROVAL_TX_FAILED = "erc20_approval_tx_failed"
 ERR_ERC20_APPROVAL_BROADCAST_FAILED = "erc20_approval_broadcast_failed"
 
 
@@ -434,7 +438,7 @@ NETWORK_CONFIGS: dict[str, NetworkConfig] = {
         "chain_id": 143,
         "default_asset": {
             "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-            "name": "USD Coin",
+            "name": "USDC",
             "version": "2",
             "decimals": 6,
         },
@@ -604,6 +608,36 @@ NETWORK_CONFIGS: dict[str, NetworkConfig] = {
             "version": "1",
             "decimals": 6,
             "asset_transfer_method": "permit2",
+        },
+    },
+    # Flare Mainnet
+    "eip155:14": {
+        "chain_id": 14,
+        "default_asset": {
+            "address": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
+            "name": "USD₮0",
+            "version": "1",
+            "decimals": 6,
+        },
+    },
+    # Celo Mainnet
+    "eip155:42220": {
+        "chain_id": 42220,
+        "default_asset": {
+            "address": "0xcebA9300f2b948710d2653dD7B07f33A8B32118C",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
+        },
+    },
+    # Celo Sepolia (Testnet)
+    "eip155:11142220": {
+        "chain_id": 11142220,
+        "default_asset": {
+            "address": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
+            "name": "USDC",
+            "version": "2",
+            "decimals": 6,
         },
     },
 }

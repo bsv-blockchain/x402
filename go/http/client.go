@@ -39,7 +39,9 @@ type PaymentRequiredHookResult struct {
 }
 
 // PaymentRequiredHook can respond to a 402 PaymentRequired before payment payload creation.
-type PaymentRequiredHook func(ctx context.Context, paymentRequired types.PaymentRequired) (*PaymentRequiredHookResult, error)
+// requestURL is the URL of the request that received the payment required response
+// (the final URL after redirects).
+type PaymentRequiredHook func(ctx context.Context, paymentRequired types.PaymentRequired, requestURL string) (*PaymentRequiredHookResult, error)
 
 // ClientExtensionPaymentRequiredHookProvider lets registered client extensions
 // expose HTTP auth-style retry hooks.
@@ -250,7 +252,7 @@ func (t *PaymentRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		return t.sendPaymentRetry(req, ctx, payloadBytes)
 	}
 
-	if authResp, authHeaders, authBody, ok, err := t.tryPaymentRequiredHooks(req, ctx, headers, body); err != nil {
+	if authResp, authHeaders, authBody, ok, err := t.tryPaymentRequiredHooks(req, resp, ctx, headers, body); err != nil {
 		return nil, err
 	} else if ok {
 		if authResp.StatusCode != http.StatusPaymentRequired {
@@ -275,6 +277,7 @@ func (t *PaymentRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	// retry once more with a freshly built payload (mirrors @x402/fetch recovery).
 	recovered, err := t.dispatchPaymentResponseHooks(ctx, build, newResp)
 	if err != nil {
+		newResp.Body.Close()
 		return nil, err
 	}
 	if !recovered || newResp.StatusCode != http.StatusPaymentRequired {
@@ -311,7 +314,8 @@ func (t *PaymentRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	correctiveBuild.paymentPayload = freshPayload
 	correctiveBuild.payloadBytes = freshBytes
 	if _, err := t.dispatchPaymentResponseHooks(ctx, &correctiveBuild, correctiveResp); err != nil {
-		return correctiveResp, nil
+		correctiveResp.Body.Close()
+		return nil, err
 	}
 	return correctiveResp, nil
 }
@@ -348,6 +352,7 @@ func prepareRequestBody(req *http.Request) (*http.Request, error) {
 
 func (t *PaymentRoundTripper) tryPaymentRequiredHooks(
 	req *http.Request,
+	resp *http.Response,
 	ctx context.Context,
 	headers map[string]string,
 	body []byte,
@@ -361,8 +366,13 @@ func (t *PaymentRoundTripper) tryPaymentRequiredHooks(
 		return nil, headers, body, false, err
 	}
 
+	requestURL := req.URL.String()
+	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+		requestURL = resp.Request.URL.String()
+	}
+
 	for _, hook := range t.x402Client.getPaymentRequiredHooks(paymentRequired) {
-		result, err := hook(ctx, paymentRequired)
+		result, err := hook(ctx, paymentRequired, requestURL)
 		if err != nil {
 			return nil, headers, body, false, err
 		}

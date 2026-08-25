@@ -25,12 +25,7 @@ describe("constants", () => {
     expect(BSV_TTN_CAIP2).toBe("bsv:ttn");
     expect(BSV_TSTN_CAIP2).toBe("bsv:tstn");
     expect(BSV_WILDCARD_CAIP2).toBe("bsv:*");
-    expect(BSV_NETWORKS).toEqual([
-      "bsv:mainnet",
-      "bsv:testnet",
-      "bsv:ttn",
-      "bsv:tstn",
-    ]);
+    expect(BSV_NETWORKS).toEqual(["bsv:mainnet", "bsv:testnet", "bsv:ttn", "bsv:tstn"]);
   });
 
   it("uses the BRC-29 protocol ID for key derivation", () => {

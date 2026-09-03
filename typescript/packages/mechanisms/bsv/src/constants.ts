@@ -4,7 +4,7 @@ import type { WalletProtocol } from "@bsv/sdk";
 /**
  * CAIP-2 style network identifier for the BSV mainnet.
  *
- * Network names follow the ChainAgnostic `bsv` namespace registration
+ * Network names follow the registered ChainAgnostic `bsv` namespace
  * (ChainAgnostic/namespaces#190). The `bip122` namespace (genesis-block
  * reference) is ambiguous for BSV because BSV shares its genesis block with
  * BTC and BCH, so this implementation uses the dedicated `bsv` namespace.

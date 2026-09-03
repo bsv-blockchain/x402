@@ -49,7 +49,7 @@ The `payload` field must contain:
 
 ### `accepted` field definitions
 
-- `network`: CAIP-2-style network identifier from the ChainAgnostic `bsv` namespace (registration in progress at [ChainAgnostic/namespaces#190](https://github.com/ChainAgnostic/namespaces/pull/190)). This spec defines behavior for `bsv:mainnet`, `bsv:testnet`, `bsv:ttn` (Teranode Test Net), and `bsv:tstn` (Teranode Scaling Test Net); implementations MAY support additional `bsv:*` identifiers provided the wallet-chain agreement rule (Verification rule 3) still holds. The `bip122` namespace (genesis-block reference) is ambiguous for BSV because BSV shares its genesis block with BTC and BCH; clients and facilitators MUST refuse ambiguous Bitcoin-family identifiers (including genesis-only `bip122:*` references) rather than defaulting them to BSV.
+- `network`: CAIP-2 network identifier from the registered ChainAgnostic [`bsv` namespace](https://github.com/ChainAgnostic/namespaces/blob/main/bsv/caip2.md) ([namespaces#190](https://github.com/ChainAgnostic/namespaces/pull/190)). This spec defines behavior for `bsv:mainnet`, `bsv:testnet`, `bsv:ttn` (Teranode Test Net), and `bsv:tstn` (Teranode Scaling Test Net); implementations MAY support additional `bsv:*` identifiers provided the wallet-chain agreement rule (Verification rule 3) still holds. The `bip122` namespace (genesis-block reference) is ambiguous for BSV because BSV shares its genesis block with BTC and BCH; clients and facilitators MUST refuse ambiguous Bitcoin-family identifiers (including genesis-only `bip122:*` references) rather than defaulting them to BSV.
 - `asset`: The literal string `BSV` — this scheme transfers native satoshis only. There is no token contract.
 - `payTo`: The recipient's BRC-100 identity public key (33-byte compressed secp256k1, 66 hex characters). This is *not* an on-chain address: the on-chain destination is a per-payment child key derived from it, unlinkable to `payTo` by third parties. It MUST be the identity key of the wallet held by the facilitator.
 - `amount`: Exact amount in satoshis (atomic units, 8 decimals per BSV), as a decimal string.
@@ -147,7 +147,7 @@ The `asset` field is the literal ticker string `BSV`. Amounts are denominated in
 
 ### Network Identifiers
 
-Registered ChainAgnostic `bsv` namespace identifiers (CAIP-2):
+Registered ChainAgnostic [`bsv` namespace](https://github.com/ChainAgnostic/namespaces/blob/main/bsv/caip2.md) identifiers (CAIP-2):
 
 - `bsv:mainnet` — BSV main network.
 - `bsv:testnet` — BSV public test network.
@@ -163,6 +163,7 @@ Wallet-chain agreement (Verification rule 3) maps each registered CAIP-2 id to t
 
 ### External References
 
+- [CAIP-2 for BSV](https://github.com/ChainAgnostic/namespaces/blob/main/bsv/caip2.md) — network identifier format (`bsv:mainnet`, `bsv:testnet`, `bsv:ttn`, `bsv:tstn`).
 - [BRC-121: Simple 402 Payments](https://bsv.brc.dev/payments/0121) — the HTTP 402 payment profile this scheme adapts to x402.
 - [BRC-29: Simple Authenticated BSV P2PKH Payment Protocol](https://bsv.brc.dev/payments/0029) — payment message format and key derivation semantics.
 - [BRC-42: BSV Key Derivation Scheme](https://bsv.brc.dev/key-derivation/0042) — the ECDH child-key derivation underlying BRC-29.

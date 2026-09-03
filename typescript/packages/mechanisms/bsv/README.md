@@ -45,7 +45,7 @@ Amounts are denominated in satoshis. There is no default USD conversion; use an 
 | Teranode Scaling Test Net       | `bsv:tstn`    |
 | Wildcard                        | `bsv:*`       |
 
-Network identifiers follow the ChainAgnostic `bsv` namespace ([registration](https://github.com/ChainAgnostic/namespaces/pull/190)). `bip122` genesis references are ambiguous for BSV (shared genesis with BTC/BCH); this package refuses them rather than defaulting to BSV.
+Network identifiers follow the registered ChainAgnostic [`bsv` namespace](https://github.com/ChainAgnostic/namespaces/blob/main/bsv/caip2.md). `bip122` genesis references are ambiguous for BSV (shared genesis with BTC/BCH); this package refuses them rather than defaulting to BSV.
 
 ## Usage
 

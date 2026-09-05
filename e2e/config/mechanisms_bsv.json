@@ -1,0 +1,51 @@
+{
+  "env": {
+    "SERVER_BSV_ADDRESS": {
+      "required": true,
+      "roles": ["server", "facilitator"]
+    },
+    "CLIENT_BSV_WALLET_URL": { "required": true, "roles": ["client"] },
+    "FACILITATOR_BSV_WALLET_URL": {
+      "required": true,
+      "roles": ["facilitator"]
+    },
+    "BSV_INVENTORY_FILE": {
+      "required": true,
+      "roles": ["server", "client", "facilitator"]
+    },
+    "BSV_CLAIMS_DIRECTORY": {
+      "required": true,
+      "roles": ["server", "client", "facilitator"]
+    },
+    "BSV_FACILITATOR_TOKEN": {
+      "required": true,
+      "roles": ["server", "facilitator"]
+    },
+    "BSV_HEADERS_URL": { "required": true, "roles": ["client", "facilitator"] },
+    "BSV_HEADERS_API_KEY": {
+      "required": false,
+      "roles": ["client", "facilitator"]
+    },
+    "BSV_ORIGINATOR": { "required": false, "roles": ["client", "facilitator"] }
+  },
+  "testnet": { "name": "BSV Testnet", "caip2": "bsv:testnet" },
+  "mainnet": {
+    "name": "BSV Mainnet (E2E unsupported)",
+    "caip2": "bsv:mainnet"
+  },
+  "routes": {
+    "/exact/bsv": {
+      "scheme": "exact",
+      "sdks": ["typescript"],
+      "requiresEnv": "BSV_INVENTORY_FILE",
+      "price": { "amount": "1000", "asset": "BSV" }
+    },
+    "/upto/bsv": {
+      "scheme": "upto",
+      "sdks": ["typescript"],
+      "requiresEnv": "BSV_INVENTORY_FILE",
+      "price": { "amount": "1000", "asset": "BSV" },
+      "settlementOverride": { "amount": "600" }
+    }
+  }
+}

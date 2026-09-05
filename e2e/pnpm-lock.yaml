@@ -13,6 +13,9 @@ importers:
       '@aptos-labs/ts-sdk':
         specifier: ^5.2.1
         version: 5.2.1(got@11.8.6)
+      '@bsv/sdk':
+        specifier: ^2.1.6
+        version: 2.1.6
       '@concordium/web-sdk':
         specifier: ^12.0.0
         version: 12.0.2(@protobuf-ts/runtime-rpc@2.11.1)(cbor2@1.12.0)
@@ -43,6 +46,9 @@ importers:
       '@x402/avm':
         specifier: workspace:*
         version: link:../typescript/packages/mechanisms/avm
+      '@x402/bsv':
+        specifier: workspace:*
+        version: link:../typescript/packages/mechanisms/bsv
       '@x402/concordium':
         specifier: workspace:*
         version: link:../typescript/packages/mechanisms/concordium
@@ -1986,6 +1992,9 @@ importers:
       '@x402/axios':
         specifier: workspace:*
         version: link:../../../typescript/packages/http/axios
+      '@x402/bsv':
+        specifier: workspace:*
+        version: link:../../../typescript/packages/mechanisms/bsv
       '@x402/concordium':
         specifier: workspace:*
         version: link:../../../typescript/packages/mechanisms/concordium
@@ -2068,6 +2077,9 @@ importers:
       '@x402/avm':
         specifier: workspace:*
         version: link:../../../typescript/packages/mechanisms/avm
+      '@x402/bsv':
+        specifier: workspace:*
+        version: link:../../../typescript/packages/mechanisms/bsv
       '@x402/concordium':
         specifier: workspace:*
         version: link:../../../typescript/packages/mechanisms/concordium
@@ -2419,6 +2431,9 @@ importers:
       '@x402/avm':
         specifier: workspace:*
         version: link:../../../typescript/packages/mechanisms/avm
+      '@x402/bsv':
+        specifier: workspace:*
+        version: link:../../../typescript/packages/mechanisms/bsv
       '@x402/concordium':
         specifier: workspace:*
         version: link:../../../typescript/packages/mechanisms/concordium

@@ -38,6 +38,10 @@ import { keyPairFromSeed, type KeyPair } from "@ton/crypto";
 import { x402Client, type SchemeRegistration } from "@x402/core/client";
 import type { SettleResponse } from "@x402/core/types";
 import { networkCaip2Pattern, resolveNetworkCaip2 } from "./catalog-network.ts";
+import { randomUUID } from "node:crypto";
+import { ExactBsvScheme } from "@x402/bsv/exact/client";
+import { UptoBsvScheme } from "@x402/bsv/upto/client";
+import { bsvChainTracker, bsvInventory, bsvPolicies, bsvWallet } from "../../bsv.ts";
 
 export type RequestResult = {
   success: boolean;
@@ -86,10 +90,26 @@ export type E2EClientContext = {
 export async function createE2EClient(): Promise<E2EClientContext> {
   const baseURL = process.env.RESOURCE_SERVER_URL as string;
   const endpointPath = process.env.ENDPOINT_PATH as string;
-  const url = `${baseURL}${endpointPath}`;
+  let url = `${baseURL}${endpointPath}`;
 
   const schemes: SchemeRegistration[] = [];
   let batchSettlementScheme: BatchSettlementEvmScheme | undefined;
+  const bsv = bsvInventory();
+  if (bsv) {
+    const wallet = bsvWallet("CLIENT");
+    schemes.push(
+      { network: networkCaip2Pattern("bsv"), client: new ExactBsvScheme(wallet) },
+      { network: networkCaip2Pattern("bsv"), client: new UptoBsvScheme(wallet, {
+        ...bsvPolicies, chainTracker: bsvChainTracker(),
+        capSourceProvider: { prepareCapSources: async context => bsv.capSources(context.control) },
+      }) },
+    );
+    if (endpointPath.includes("/upto/bsv")) {
+      const quoted = new URL(url);
+      quoted.searchParams.set("quote", randomUUID());
+      url = quoted.toString();
+    }
+  }
 
   if (process.env.CLIENT_EVM_PRIVATE_KEY) {
     const evmAccount = privateKeyToAccount(process.env.CLIENT_EVM_PRIVATE_KEY as `0x${string}`);

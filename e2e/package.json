@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@aptos-labs/ts-sdk": "^5.2.1",
+    "@bsv/sdk": "^2.1.6",
     "@concordium/web-sdk": "^12.0.0",
     "@keetanetwork/keetanet-client": "^0.18.1",
     "@modelcontextprotocol/sdk": "^1.15.1",
@@ -31,6 +32,7 @@
     "@swig-wallet/lib": "^2.0.0",
     "@x402/aptos": "workspace:*",
     "@x402/avm": "workspace:*",
+    "@x402/bsv": "workspace:*",
     "@x402/concordium": "workspace:*",
     "@x402/core": "workspace:*",
     "@x402/evm": "workspace:*",

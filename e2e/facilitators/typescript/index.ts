@@ -86,6 +86,9 @@ import * as KeetaNet from "@keetanetwork/keetanet-client";
 import crypto from "crypto";
 import dotenv from "dotenv";
 import express from "express";
+import { ExactBsvScheme } from "@x402/bsv/exact/facilitator";
+import { InMemoryTerminalStore, UptoBsvScheme } from "@x402/bsv/upto/facilitator";
+import { bsvChainTracker, bsvEnv, bsvInventory, bsvPolicies, bsvWallet } from "../../bsv.js";
 import {
   createWalletClient,
   http,
@@ -543,6 +546,23 @@ async function waitForBatchSettlementDepositConfirmed(
 const facilitator = new x402Facilitator();
 
 // Register each configured family (exact CAIP-2 from catalog / env)
+const bsv = bsvInventory();
+if (bsv) {
+  const wallet = bsvWallet("FACILITATOR");
+  const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey;
+  if (identity.toLowerCase() !== bsv.data.payTo.toLowerCase() || identity.toLowerCase() !== bsvEnv("SERVER_BSV_ADDRESS").toLowerCase()) throw new Error("BSV inventory payee does not match recipient wallet");
+  const fee = BigInt(bsv.data.fee);
+  facilitator.register(resolveNetworkCaip2("bsv") as Network, await ExactBsvScheme.create({ wallet }));
+  facilitator.register(resolveNetworkCaip2("bsv") as Network, new UptoBsvScheme({
+    ...bsvPolicies, wallet, identityKey: identity, chainTracker: bsvChainTracker(),
+    terminalStore: new InMemoryTerminalStore(), admitFee: context => fee <= context.feeHeadroom,
+    planTerminal: context => {
+      const refund = context.exposure - context.actualAmount - fee;
+      return { recipientAmounts: [Number(context.controlInputTotal + context.actualAmount)], refundAmounts: refund === 0n ? [] : [Number(refund)] };
+    },
+  }));
+}
+
 if (evmSigner && authorizerSigner) {
   facilitator
     .register(EVM_NETWORK as Network, new ExactEvmScheme(evmSigner))
@@ -730,7 +750,7 @@ facilitator
   .onBeforeSettle(async (context) => {
     // Hook 3: Validate payment was previously verified (authorization flow only).
     // Escrow/upfront/batch-settlement skip /verify — see x402ResourceServer.verifyPayment.
-    if (skipsVerifyBeforeSettle(context.requirements)) {
+    if (context.requirements.network.startsWith("bsv:") || skipsVerifyBeforeSettle(context.requirements)) {
       return;
     }
 
@@ -836,6 +856,15 @@ app.post("/settle", async (req, res) => {
       return res.status(400).json({
         error: "Missing paymentPayload or paymentRequirements",
       });
+    }
+
+    if (String(paymentRequirements.network).startsWith("bsv:") || String(paymentPayload.accepted?.network).startsWith("bsv:")) {
+      try {
+        if (!bsv || paymentPayload.accepted?.scheme !== paymentRequirements.scheme || paymentPayload.accepted?.payTo !== paymentRequirements.payTo) throw new Error("BSV settlement requirements mismatch");
+        bsv.authorize(req.get("X-BSV-E2E-Authorization"), bsvEnv("BSV_FACILITATOR_TOKEN"), paymentPayload.accepted);
+      } catch {
+        return res.status(401).json({ error: "Unauthorized BSV settlement caller or control offer" });
+      }
     }
 
     // Hooks will automatically:

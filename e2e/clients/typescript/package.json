@@ -9,6 +9,7 @@
     "dev:svm-smart-wallet": "tsx http/svm-smart-wallet/index.ts"
   },
   "dependencies": {
+    "@x402/bsv": "workspace:*",
     "@aptos-labs/ts-sdk": "^5.2.1",
     "@concordium/web-sdk": "^12.0.0",
     "@keetanetwork/keetanet-client": "^0.18.1",

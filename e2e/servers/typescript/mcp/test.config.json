@@ -1,0 +1,7 @@
+{
+  "type": "server",
+  "language": "typescript",
+  "transport": "mcp",
+  "x402Version": 2,
+  "excludeNetworks": ["bsv"]
+}

@@ -1,4 +1,8 @@
 import { ExactAvmScheme } from "@x402/avm/exact/server";
+import { ExactBsvScheme } from "@x402/bsv/exact/server";
+import { InMemoryAuthorizationStore, UptoBsvScheme } from "@x402/bsv/upto/server";
+import type { HTTPRequestContext } from "@x402/core/server";
+import { bsvEnv, bsvInventory } from "../../bsv";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { UptoEvmScheme } from "@x402/evm/upto/server";
 import { BatchSettlementEvmScheme } from "@x402/evm/batch-settlement/server";
@@ -45,7 +49,10 @@ export { loadServerEnv } from "../../src/server-env";
  * Builds facilitator clients from FACILITATOR_URL (+ optional MOCK_FACILITATOR_URL).
  */
 export function createFacilitatorClients(facilitatorUrl: string): HTTPFacilitatorClient[] {
-  const facilitatorClients = [new HTTPFacilitatorClient({ url: facilitatorUrl })];
+  const token = process.env.BSV_INVENTORY_FILE ? bsvEnv("BSV_FACILITATOR_TOKEN") : undefined;
+  const facilitatorClients = [new HTTPFacilitatorClient({ url: facilitatorUrl, ...(token ? {
+    createAuthHeaders: async () => ({ settle: { "X-BSV-E2E-Authorization": `Bearer ${token}` } }),
+  } : {}) })];
   const mockFacilitatorUrl = process.env.MOCK_FACILITATOR_URL;
   if (mockFacilitatorUrl) {
     facilitatorClients.push(new HTTPFacilitatorClient({ url: mockFacilitatorUrl }));
@@ -62,6 +69,10 @@ async function registerFamilySchemes(
   const pattern = networkCaip2Pattern(family);
 
   switch (family) {
+    case "bsv":
+      server.register(pattern, new ExactBsvScheme());
+      server.register(pattern, new UptoBsvScheme({ authorizationStore: new InMemoryAuthorizationStore() }));
+      return;
     case "avm":
       server.register(pattern, new ExactAvmScheme());
       return;
@@ -184,7 +195,16 @@ export function buildResolvedRouteConfig(
       payTo: route.payTo,
       scheme: route.scheme,
       network: route.network as Caip2Network,
-      price: route.price,
+      price: route.networkId === "bsv" && route.scheme === "upto"
+        ? (context: HTTPRequestContext) => {
+          const inventory = bsvInventory();
+          if (!inventory || route.payTo.toLowerCase() !== inventory.data.payTo.toLowerCase()) throw new Error("BSV inventory payee mismatch");
+          if (typeof route.price === "string") throw new Error("BSV inventory requires a satoshi amount");
+          const quote = new URL(context.adapter.getUrl()).searchParams.get("quote") ?? "";
+          const control = inventory.offer(quote, context.adapter.getHeader("PAYMENT-SIGNATURE") !== undefined);
+          return { ...route.price, extra: { ...route.price.extra, control } };
+        }
+        : route.price,
       ...(route.extra ? { extra: route.extra } : {}),
     },
     ...(route.extensions.length > 0 ? { extensions } : {}),

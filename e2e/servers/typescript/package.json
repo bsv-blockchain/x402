@@ -8,6 +8,7 @@
     "dev:mcp": "tsx mcp/index.ts"
   },
   "dependencies": {
+    "@x402/bsv": "workspace:*",
     "@hono/node-server": "^1.14.0",
     "@modelcontextprotocol/sdk": "^1.15.1",
     "@x402/aptos": "workspace:*",

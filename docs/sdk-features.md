@@ -32,6 +32,7 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | avm (Algorand) | ✅ | ❌ | ❌ |
 | stellar | ✅ | ❌ | ❌ |
 | aptos | ✅ | ❌ | ❌ |
+| casper | ✅ | ❌ | ❌ |
 | hedera | ✅ | ❌ | ❌ |
 | keeta | ✅ | ❌ | ❌ |
 | near | ✅ | ❌ | ❌ |
@@ -49,6 +50,7 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | exact | avm | - | ✅ | ❌ | ❌ |
 | exact | stellar | - | ✅ | ❌ | ❌ |
 | exact | aptos | - | ✅ | ❌ | ❌ |
+| exact | casper | CEP-3009 | ✅ | ❌  | ❌ |
 | exact | hedera | - | ✅ | ❌ | ❌ |
 | exact | tvm | - | ✅ | ❌ | ✅ |
 | exact | keeta | - | ✅ | ❌ | ❌ |
@@ -144,17 +146,17 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 
 | Hook | TypeScript | Go | Python |
 |------|------------|-----|--------|
-| onPaymentRequired | ✅ | ❌ | ❌ |
-| onBeforePayment | ✅ | ❌ | ❌ |
-| onAfterPayment | ✅ | ❌ | ❌ |
+| onPaymentRequired | ✅ | ✅ | ❌ |
+| onBeforePayment | ✅ | ✅ | ❌ |
+| onAfterPayment | ✅ | ✅ | ❌ |
 
 ### MCP Server Hooks (payment wrapper)
 
 | Hook | TypeScript | Go | Python |
 |------|------------|-----|--------|
-| onBeforeExecution | ✅ | ❌ | ✅ |
-| onAfterExecution | ✅ | ❌ | ✅ |
-| onAfterSettlement | ✅ | ❌ | ✅ |
+| onBeforeExecution | ✅ | ✅ | ✅ |
+| onAfterExecution | ✅ | ✅ | ✅ |
+| onAfterSettlement | ✅ | ✅ | ✅ |
 
 ## HTTP Server Features
 

@@ -13,6 +13,7 @@
       "@x402/aptos",
       "@x402/bsv",
       "@x402/cardano",
+      "@x402/casper",
       "@x402/stellar",
       "@x402/svm",
       "@x402/tvm",

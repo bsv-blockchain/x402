@@ -2,6 +2,7 @@ import { ExactAvmScheme } from "@x402/avm/exact/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { UptoEvmScheme } from "@x402/evm/upto/server";
 import { BatchSettlementEvmScheme } from "@x402/evm/batch-settlement/server";
+import { BatchSvmScheme as BatchSettlementSvmScheme } from "@x402/svm/batch-settlement/server";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { UptoSvmScheme } from "@x402/svm/upto/server";
 import { base58 } from "@scure/base";
@@ -105,19 +106,32 @@ async function registerFamilySchemes(
     case "svm": {
       server.register(pattern, new ExactSvmScheme());
       const receiverAuthorizerPrivateKey = process.env.SERVER_SVM_RECEIVER_AUTHORIZER_PRIVATE_KEY;
-      if (receiverAuthorizerPrivateKey) {
-        const receiverAuthorizerSigner = await createKeyPairSignerFromBytes(
-          base58.decode(receiverAuthorizerPrivateKey),
-        );
-        console.info(`SVM receiver authorizer: ${receiverAuthorizerSigner.address}`);
-        server.register(
-          pattern,
-          new UptoSvmScheme({
-            receiverAuthorizerSigner,
-            rpcUrl: process.env.SVM_RPC_URL,
-          }),
-        );
+      const receiverAuthorizerSigner = receiverAuthorizerPrivateKey
+        ? await createKeyPairSignerFromBytes(base58.decode(receiverAuthorizerPrivateKey))
+        : undefined;
+      if (!receiverAuthorizerSigner) return;
+      console.info(`SVM receiver authorizer: ${receiverAuthorizerSigner.address}`);
+      server.register(
+        pattern,
+        new UptoSvmScheme({
+          receiverAuthorizerSigner,
+          rpcUrl: process.env.SVM_RPC_URL,
+        }),
+      );
+      const operatorPrivateKey = process.env.SERVER_SVM_OPERATOR_PRIVATE_KEY;
+      const operatorSigner = operatorPrivateKey
+        ? await createKeyPairSignerFromBytes(base58.decode(operatorPrivateKey))
+        : undefined;
+      if (operatorSigner) {
+        console.info(`SVM batch-settlement operator: ${operatorSigner.address}`);
       }
+      server.register(
+        pattern,
+        new BatchSettlementSvmScheme({
+          receiverAuthorizer: receiverAuthorizerSigner,
+          ...(operatorSigner ? { operator: operatorSigner } : {}),
+        }),
+      );
       return;
     }
     case "aptos":

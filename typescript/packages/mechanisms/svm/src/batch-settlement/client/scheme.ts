@@ -983,11 +983,11 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (!cached && (requirements.extra?.voucherSigner ?? "client") === "server") {
       try {
         const serverTerms = await this.resolveTerms(requirements);
-        const discovered = await this.discoverChannel(requirements, serverTerms);
-        if (discovered) {
-          lookupRequirements = this.requirementsForRefund(requirements, discovered);
-          terms = await this.resolveRefundTerms(lookupRequirements, discovered);
-          return { existing: discovered, lookupRequirements, terms };
+        const serverChannel = await this.loadRefundChannel(requirements, serverTerms);
+        if (serverChannel) {
+          lookupRequirements = this.requirementsForRefund(requirements, serverChannel);
+          terms = await this.resolveRefundTerms(lookupRequirements, serverChannel);
+          return { existing: serverChannel, lookupRequirements, terms };
         }
       } catch (error) {
         if (!(error instanceof UntrustedOperatorError)) throw error;

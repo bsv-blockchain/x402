@@ -56,6 +56,11 @@ type HTTPAdapter interface {
 // "eip155:84532"). When set, the entry for the rendered chain wins over the
 // paywall's curated default. Unmapped chains render "No faucet configured."
 // rather than a fallback link.
+//
+// RPCURLs is a per-chain RPC endpoint map keyed by CAIP-2 identifier, used by
+// the paywall from the browser (currently the SVM paywall only). Chains without
+// an entry use the public default. The URLs are visible to every visitor, so
+// use browser-safe endpoints, never secret keys.
 type PaywallConfig struct {
 	AppName    string `json:"appName,omitempty"`
 	AppLogo    string `json:"appLogo,omitempty"`
@@ -63,6 +68,8 @@ type PaywallConfig struct {
 	Testnet    bool   `json:"testnet,omitempty"`
 	// FaucetURLs is a per-chain override keyed by CAIP-2 identifier.
 	FaucetURLs map[string]string `json:"faucetUrls,omitempty"`
+	// RPCURLs is a per-chain browser RPC endpoint keyed by CAIP-2 identifier.
+	RPCURLs map[string]string `json:"rpcUrls,omitempty"`
 }
 
 // DynamicPayToFunc is a function that resolves payTo address dynamically based on request context
@@ -1388,7 +1395,7 @@ func (s *x402HTTPResourceServer) generatePaywallHTML(paymentRequired x402.Paymen
 	appLogo := ""
 	testnet := false
 	currentURL := ""
-	var faucetURLs map[string]string
+	var faucetURLs, rpcURLs map[string]string
 
 	if config != nil {
 		appName = config.AppName
@@ -1396,6 +1403,7 @@ func (s *x402HTTPResourceServer) generatePaywallHTML(paymentRequired x402.Paymen
 		testnet = config.Testnet
 		currentURL = config.CurrentURL
 		faucetURLs = config.FaucetURLs
+		rpcURLs = config.RPCURLs
 	}
 
 	// Use resource URL as currentUrl if not explicitly configured
@@ -1415,7 +1423,8 @@ func (s *x402HTTPResourceServer) generatePaywallHTML(paymentRequired x402.Paymen
 			testnet: %t,
 			displayAmount: %.2f,
 			currentUrl: "%s",
-			faucetUrls: %s
+			faucetUrls: %s,
+			rpcUrls: %s
 		};
 	</script>`,
 		string(requirementsJSON),
@@ -1425,7 +1434,8 @@ func (s *x402HTTPResourceServer) generatePaywallHTML(paymentRequired x402.Paymen
 		testnet,
 		displayAmount,
 		html.EscapeString(currentURL),
-		marshalFaucetURLs(faucetURLs),
+		marshalURLMap(faucetURLs),
+		marshalURLMap(rpcURLs),
 	)
 
 	// Select template based on network
@@ -1480,7 +1490,7 @@ func injectPaywallConfig(template string, paymentRequired types.PaymentRequired,
 	appLogo := ""
 	testnet := false
 	currentURL := ""
-	var faucetURLs map[string]string
+	var faucetURLs, rpcURLs map[string]string
 
 	if config != nil {
 		appName = config.AppName
@@ -1488,6 +1498,7 @@ func injectPaywallConfig(template string, paymentRequired types.PaymentRequired,
 		testnet = config.Testnet
 		currentURL = config.CurrentURL
 		faucetURLs = config.FaucetURLs
+		rpcURLs = config.RPCURLs
 	}
 
 	if currentURL == "" && paymentRequired.Resource != nil {
@@ -1505,7 +1516,8 @@ func injectPaywallConfig(template string, paymentRequired types.PaymentRequired,
 			testnet: %t,
 			displayAmount: %.2f,
 			currentUrl: "%s",
-			faucetUrls: %s
+			faucetUrls: %s,
+			rpcUrls: %s
 		};
 	</script>`,
 		string(requirementsJSON),
@@ -1515,14 +1527,15 @@ func injectPaywallConfig(template string, paymentRequired types.PaymentRequired,
 		testnet,
 		displayAmount,
 		html.EscapeString(currentURL),
-		marshalFaucetURLs(faucetURLs),
+		marshalURLMap(faucetURLs),
+		marshalURLMap(rpcURLs),
 	)
 
 	return strings.Replace(template, "</head>", configScript+"\n</head>", 1)
 }
 
-// marshalFaucetURLs renders FaucetURLs as a JS literal: a JSON object or `undefined`.
-func marshalFaucetURLs(urls map[string]string) string {
+// marshalURLMap renders a CAIP-2 keyed URL map (FaucetURLs, RPCURLs) as a JS literal: a JSON object or `undefined`.
+func marshalURLMap(urls map[string]string) string {
 	if len(urls) == 0 {
 		return "undefined"
 	}

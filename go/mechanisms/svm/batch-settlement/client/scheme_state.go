@@ -204,17 +204,17 @@ func (s *BatchSvmScheme) locateRefundChannel(
 			}
 			return nil, lookup, resolvedTerms{}, serverErr
 		}
-		discovered, discoverErr := s.discoverChannel(ctx, requirements, serverTerms)
-		if discoverErr != nil {
-			return nil, lookup, resolvedTerms{}, discoverErr
+		serverChannel, loadErr := s.loadRefundChannel(ctx, requirements, serverTerms, nil)
+		if loadErr != nil {
+			return nil, lookup, resolvedTerms{}, loadErr
 		}
-		if discovered != nil {
-			lookup = AlignRefundRequirements(requirements, discovered.tracker.ChannelConfig)
-			terms, err = s.resolveRefundTerms(ctx, lookup, discovered)
+		if serverChannel != nil {
+			lookup = AlignRefundRequirements(requirements, serverChannel.tracker.ChannelConfig)
+			terms, err = s.resolveRefundTerms(ctx, lookup, serverChannel)
 			if err != nil {
 				return nil, lookup, resolvedTerms{}, err
 			}
-			return discovered, lookup, terms, nil
+			return serverChannel, lookup, terms, nil
 		}
 	}
 

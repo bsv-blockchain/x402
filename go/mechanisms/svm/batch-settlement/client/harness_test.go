@@ -38,6 +38,8 @@ func boolPtr(value bool) *bool { return &value }
 type memoryStorage struct {
 	mu      sync.Mutex
 	records map[string]BatchClientChannelRecord
+	gets    []string
+	sets    []string
 }
 
 func newMemoryStorage() *memoryStorage {
@@ -47,6 +49,7 @@ func newMemoryStorage() *memoryStorage {
 func (s *memoryStorage) Get(key string) (*BatchClientChannelRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.gets = append(s.gets, key)
 	record, ok := s.records[key]
 	if !ok {
 		return nil, nil
@@ -58,6 +61,7 @@ func (s *memoryStorage) Get(key string) (*BatchClientChannelRecord, error) {
 func (s *memoryStorage) Set(key string, record BatchClientChannelRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sets = append(s.sets, key)
 	s.records[key] = record
 	return nil
 }
@@ -76,6 +80,36 @@ func (s *memoryStorage) only() BatchClientChannelRecord {
 		return record
 	}
 	return BatchClientChannelRecord{}
+}
+
+func (s *memoryStorage) got(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, got := range s.gets {
+		if got == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *memoryStorage) setCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sets)
+}
+
+func (s *memoryStorage) size() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.records)
+}
+
+func (s *memoryStorage) resetCalls() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets = nil
+	s.sets = nil
 }
 
 type rpcStub struct {

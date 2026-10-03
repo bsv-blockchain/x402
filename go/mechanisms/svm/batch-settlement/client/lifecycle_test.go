@@ -39,6 +39,7 @@ func TestBatchClientLifecycle(t *testing.T) {
 	t.Run("validates client terms and configuration boundaries", testValidatesTerms)
 	t.Run("builds a refund from a cached channel and rejects a missing one", testRefundFromCache)
 	t.Run("refunds a client-signed channel when the probe lists server-signed first", testRefundServerFirst)
+	t.Run("refunds a persisted server-signed channel after restart without discovery", testRefundPersistedServerSignedAfterRestart)
 	t.Run("reports no channel when the probe is server-signed and nothing is open", testRefundNoChannelServerProbe)
 }
 
@@ -559,6 +560,66 @@ func testRefundServerFirst(t *testing.T) {
 	require.Equal(t, "refund", cooperative.Payload["type"])
 	require.Equal(t, svm.USDCMainnetAddress, nestedString(t, cooperative.Payload, "voucher", "channelId"))
 	require.Equal(t, "1000", nestedString(t, cooperative.Payload, "voucher", "maxClaimableAmount"))
+}
+
+func testRefundPersistedServerSignedAfterRestart(t *testing.T) {
+	h := newHarness(t)
+	operator := newKey(t)
+	storage := newMemoryStorage()
+	serverRequirements := h.requirements("", map[string]any{
+		batchsettlement.ExtraOperator:      operator.Address().String(),
+		batchsettlement.ExtraVoucherSigner: batchsettlement.VoucherSignerServer,
+	})
+	keyed := h.scheme(t, &BatchSvmClientConfig{
+		ChannelStorage:   storage,
+		DiscoverChannels: boolPtr(false),
+		ServerSignedChannelsPolicy: &BatchServerSignedChannelsPolicy{
+			AllowedOperators: []string{operator.Address().String()},
+		},
+	})
+	key := keyed.channelKey(serverRequirements, h.feePayer.String(), 900)
+	storage.records[key] = BatchClientChannelRecord{
+		ChannelConfig: batchsettlement.BatchChannelConfig{
+			OpenSlot:           123,
+			Payer:              h.payer.Address().String(),
+			PayerAuthorizer:    operator.Address().String(),
+			Receiver:           svm.USDCMainnetAddress,
+			ReceiverAuthorizer: h.receiverAuthorizer.String(),
+			Salt:               "0",
+			Token:              testMint,
+			VoucherSigner:      batchsettlement.VoucherSignerServer,
+			WithdrawDelay:      900,
+		},
+		ChannelID:               svm.USDCMainnetAddress,
+		ChargedCumulativeAmount: "1000",
+		Deposit:                 "5000",
+	}
+
+	untrusted := h.scheme(t, &BatchSvmClientConfig{
+		ChannelStorage:   storage,
+		DiscoverChannels: boolPtr(false),
+	})
+	_, err := untrusted.CreateRefundPayload(context.Background(), 2, serverRequirements, RefundPayloadOptions{})
+	require.ErrorIs(t, err, ErrNoBatchChannelToRefund)
+	require.False(t, storage.got(key))
+	storage.resetCalls()
+
+	restarted := h.scheme(t, &BatchSvmClientConfig{
+		ChannelStorage:   storage,
+		DiscoverChannels: boolPtr(false),
+		ServerSignedChannelsPolicy: &BatchServerSignedChannelsPolicy{
+			AllowedOperators: []string{operator.Address().String()},
+		},
+	})
+	cooperative, err := restarted.CreateRefundPayload(context.Background(), 2, serverRequirements, RefundPayloadOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 2, cooperative.X402Version)
+	require.Equal(t, "refund", cooperative.Payload["type"])
+	require.Equal(t, "0", nestedString(t, cooperative.Payload, "authorization", "authorizedAmount"))
+	require.Equal(t, svm.USDCMainnetAddress, nestedString(t, cooperative.Payload, "authorization", "channelId"))
+	require.True(t, storage.got(key))
+	require.Zero(t, storage.setCount())
+	require.Equal(t, 1, storage.size())
 }
 
 func testRefundNoChannelServerProbe(t *testing.T) {

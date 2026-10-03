@@ -1372,6 +1372,10 @@ class x402HTTPServerBase:
             "displayAmount": round(display_amount, 2),
             "currentUrl": current_url,
         }
+        if config and config.faucet_urls:
+            x402_config["faucetUrls"] = config.faucet_urls
+        if config and config.rpc_urls:
+            x402_config["rpcUrls"] = config.rpc_urls
         config_script = (
             f"<script>\n    window.x402 = {htmlsafe_json_dumps(x402_config)};\n</script>"
         )

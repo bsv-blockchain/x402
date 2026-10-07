@@ -50,7 +50,8 @@ func newCustomRun(t *testing.T, charge bool) *customRun {
 
 	signer := newMockFacSigner(customSubmitter)
 	signer.tokenStore = customTokenStore
-	scheme := newScheme(signer, AuthCaptureEvmSchemeConfig{Operators: allowAllCustomOperators})
+	// The custom operator is not a signer address, so the scheme is relay-only.
+	scheme := NewAuthCaptureEvmScheme(signer, AuthCaptureEvmSchemeConfig{Operators: allowAllCustomOperators})
 	pre, err := scheme.checkCollectPreconditions(context.Background(), payload, requirements, charge)
 	require.NoError(t, err)
 
@@ -413,6 +414,38 @@ func TestSettleCustomCollect(t *testing.T) {
 		assert.Empty(t, run.signer.writtenFunctions)
 	})
 
+	t.Run("a lagging paymentState read is retried until the collect is visible", func(t *testing.T) {
+		run := newCustomRun(t, false)
+		arm(run)
+		write := run.signer.afterWrite
+		run.signer.afterWrite = func(function string) {
+			write(function)
+			run.signer.stalePaymentStateReads = 2
+		}
+
+		resp, err := run.scheme.Settle(context.Background(), run.payload, run.requirements, nil)
+		require.NoError(t, err)
+		assert.True(t, resp.Success)
+		assert.Equal(t, 0, run.signer.stalePaymentStateReads)
+	})
+
+	t.Run("a payment that stays uncollected is rejected", func(t *testing.T) {
+		run := newCustomRun(t, false)
+		arm(run)
+		write := run.signer.afterWrite
+		run.signer.afterWrite = func(function string) {
+			write(function)
+			run.signer.paymentStateHasCollected = false
+			run.signer.paymentStateCapturable = big.NewInt(0)
+			run.signer.paymentStateRefundable = big.NewInt(0)
+		}
+
+		resp, err := run.scheme.Settle(context.Background(), run.payload, run.requirements, nil)
+		require.NoError(t, err)
+		assert.False(t, resp.Success)
+		assert.Equal(t, ErrUnexpectedPaymentState, resp.ErrorReason)
+	})
+
 	t.Run("a resumed settlement is still checked against the receipt", func(t *testing.T) {
 		run := newCustomRun(t, true)
 		arm(run)
@@ -428,13 +461,12 @@ func TestSettleCustomCollect(t *testing.T) {
 
 func TestCustomOperatorRequiresASimulatingSigner(t *testing.T) {
 	run := newCustomRun(t, false)
-	plain := &plainSigner{FacilitatorEvmSigner: run.signer}
-	scheme := newScheme(nil, AuthCaptureEvmSchemeConfig{Operators: allowAllCustomOperators})
-	scheme.signer = plain
+	plain := &plainSigner{Signer: run.signer}
+	scheme := NewAuthCaptureEvmScheme(plain, AuthCaptureEvmSchemeConfig{Operators: allowAllCustomOperators})
 
 	err := scheme.simulateCustomCollect(context.Background(), run.pre)
 	assertVerifyReason(t, err, ErrOperatorNotAdmitted)
 }
 
 // plainSigner hides the optional simulator and gas-limit capabilities.
-type plainSigner struct{ evm.FacilitatorEvmSigner }
+type plainSigner struct{ Signer }

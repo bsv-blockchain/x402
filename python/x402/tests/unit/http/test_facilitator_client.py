@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -232,6 +233,19 @@ def test_create_headers_allows_omitted_paths():
 
     assert headers.verify == {"Authorization": "Bearer verify"}
     assert headers.settle == {}
+
+
+def test_create_headers_accepts_mapping_path_values():
+    client = HTTPFacilitatorClientSync(
+        {
+            "url": "https://facilitator.test",
+            "create_headers": lambda: {
+                "verify": MappingProxyType({"Authorization": "Bearer verify"}),
+            },
+        }
+    )
+
+    assert client._get_verify_headers()["Authorization"] == "Bearer verify"
 
 
 def test_create_headers_rejects_flat_headers_dict():

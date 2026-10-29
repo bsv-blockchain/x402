@@ -245,6 +245,7 @@ The `SettleResponse` schema contains the following fields:
 | ------------- | --------- | -------- | --------------------------------------------------------------------- |
 | `success`     | `boolean` | Required | Indicates whether the payment settlement was successful               |
 | `errorReason` | `string`  | Optional | Error reason if settlement failed (omitted if successful)             |
+| `errorMessage` | `string`  | Optional | Human-readable explanation of `errorReason`                          |
 | `payer`       | `string`  | Optional | Address of the payer's wallet                                         |
 | `transaction` | `string`  | Required | Blockchain transaction hash (empty string if no transaction was broadcast; MUST be non-empty when `errorReason` is `settlement_pending` — see §9 Error Handling) |
 | `network`     | `string`  | Required | Blockchain network identifier in CAIP-2 format                        |
@@ -262,6 +263,7 @@ The `VerifyResponse` schema contains the following fields:
 | --------------- | --------- | -------- | ------------------------------------------------------- |
 | `isValid`       | `boolean` | Required | Indicates whether the payment authorization is valid    |
 | `invalidReason` | `string`  | Optional | Reason for invalidity (omitted if valid)                |
+| `invalidMessage` | `string`  | Optional | Human-readable explanation of `invalidReason`           |
 | `payer`         | `string`  | Optional | Address of the payer's wallet                           |
 | `extensions`    | `object`  | Optional | Protocol extensions data                                |
 | `extra`         | `object`  | Optional | Scheme-specific additional data                         |
@@ -589,6 +591,8 @@ GET /discovery/search?query=financial+data&limit=10&cursor=eyJwYWdlIjoyfQ==
 ## 9. Error Handling
 
 The x402 protocol defines standard error codes that may be returned by facilitators or resource servers. These error codes help clients understand why a payment failed and take appropriate action.
+
+The optional `invalidMessage` and `errorMessage` fields provide human-readable diagnostics for logs and operators. Their text is free-form and may change across facilitators or releases. When matching specific error conditions, clients MUST use the corresponding `invalidReason` or `errorReason` code and MUST NOT rely on message text.
 
 - **`insufficient_funds`**: Client does not have enough tokens to complete the payment
 - **`invalid_exact_evm_payload_authorization_valid_after`**: Payment authorization is not yet valid (before validAfter timestamp)

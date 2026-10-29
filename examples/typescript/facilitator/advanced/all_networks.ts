@@ -5,7 +5,7 @@
  * optional chain configuration via environment variables.
  *
  * New chain support should be added here in alphabetic order by network prefix
- * (e.g., "algorand" before "aptos" before "bsv" before "cardano" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm" before "xrpl").
+ * (e.g., "algorand" before "aptos" before "bsv" before "canton" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm" before "xrpl").
  */
 
 import {
@@ -25,6 +25,8 @@ import { toFacilitatorCardanoSigner } from "@x402/cardano";
 import { ExactCardanoScheme } from "@x402/cardano/exact/facilitator";
 import { createFacilitatorCasperSigner } from "@x402/casper";
 import { ExactCasperScheme } from "@x402/casper/exact/facilitator";
+import { toFacilitatorCantonSigner } from "@x402/canton";
+import { ExactCantonScheme } from "@x402/canton/exact/facilitator";
 import { ExactConcordiumScheme } from "@x402/concordium/exact/facilitator";
 import {
   CONCORDIUM_TESTNET_CAIP2,
@@ -103,11 +105,32 @@ const aptosPrivateKey = process.env.APTOS_PRIVATE_KEY as string | undefined;
 const aptosRpcUrl = process.env.APTOS_RPC_URL as string | undefined;
 // BSV settlement internalizes into the recipient's server-side BRC-100 wallet
 // (@bsv/simple ServerWallet: private key + wallet storage endpoint).
-const bsvServerPrivateKey = process.env.BSV_SERVER_PRIVATE_KEY as string | undefined;
+const bsvServerPrivateKey = process.env.BSV_SERVER_PRIVATE_KEY as
+  | string
+  | undefined;
 const bsvWalletStorageUrl =
   process.env.BSV_WALLET_STORAGE_URL || "https://store-us-1.bsvb.tech";
 const casperPrivateKey = process.env.CASPER_PRIVATE_KEY as string | undefined;
 const casperRpcUrl = process.env.CASPER_RPC_URL as string | undefined;
+// Canton: a hosted participant + the facilitator's own relaying party.
+const cantonParticipantUrl = process.env.CANTON_PARTICIPANT_URL as
+  | string
+  | undefined;
+const cantonToken = process.env.CANTON_TOKEN as string | undefined;
+const cantonUserId = process.env.CANTON_USER_ID as string | undefined;
+const cantonSynchronizerId = process.env.CANTON_SYNCHRONIZER_ID as
+  | string
+  | undefined;
+const cantonFacilitatorParty = process.env.CANTON_FACILITATOR_PARTY as
+  | string
+  | undefined;
+const cantonConfigured = Boolean(
+  cantonParticipantUrl &&
+    cantonToken &&
+    cantonUserId &&
+    cantonSynchronizerId &&
+    cantonFacilitatorParty,
+);
 const ccdFacilitatorPrivateKey = process.env.CCD_FACILITATOR_PRIVATE_KEY as
   | string
   | undefined;
@@ -141,6 +164,7 @@ if (
   !aptosPrivateKey &&
   !bsvServerPrivateKey &&
   !casperPrivateKey &&
+  !cantonConfigured &&
   !(ccdFacilitatorPrivateKey && ccdFacilitatorAddress) &&
   !evmPrivateKey &&
   !keetaMnemonic &&
@@ -151,7 +175,7 @@ if (
   !(hederaAccountId && hederaPrivateKey)
 ) {
   console.error(
-    "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, BSV_SERVER_PRIVATE_KEY, CARDANO_MNEMONIC, CASPER_PRIVATE_KEY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
+    "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, BSV_SERVER_PRIVATE_KEY, CARDANO_MNEMONIC, CASPER_PRIVATE_KEY, CANTON_PARTICIPANT_URL + CANTON_TOKEN + CANTON_USER_ID + CANTON_SYNCHRONIZER_ID + CANTON_FACILITATOR_PARTY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
   );
   process.exit(1);
 }
@@ -163,6 +187,10 @@ const APTOS_NETWORK = (process.env.APTOS_NETWORK || "aptos:2") as Network; // Ap
 const BSV_NETWORK = (process.env.BSV_NETWORK || "bsv:mainnet") as Network; // BSV Mainnet
 const CASPER_NETWORK = (process.env.CASPER_NETWORK ||
   "casper:casper-test") as Network; // Casper Testnet
+// Canton CAIP-2 tier (canton:mainnet | canton:devnet); the synchronizer/domain
+// travels separately (signer config + extra.synchronizerId), not in the network id.
+const CANTON_NETWORK = (process.env.CANTON_NETWORK ||
+  "canton:mainnet") as Network;
 const CCD_NETWORK = CONCORDIUM_TESTNET_CAIP2; // Concordium Testnet
 const EVM_NETWORK = "eip155:84532"; // Base Sepolia
 const HEDERA_NETWORK = "hedera:testnet"; // Hedera Testnet
@@ -246,8 +274,12 @@ if (bsvServerPrivateKey) {
     network: bsvWalletNetwork,
     storageUrl: bsvWalletStorageUrl,
   });
-  const bsvScheme = await ExactBsvScheme.create({ wallet: bsvWallet.getClient() });
-  console.info(`BSV Facilitator identity: ${bsvScheme.getSigners(BSV_NETWORK)[0]}`);
+  const bsvScheme = await ExactBsvScheme.create({
+    wallet: bsvWallet.getClient(),
+  });
+  console.info(
+    `BSV Facilitator identity: ${bsvScheme.getSigners(BSV_NETWORK)[0]}`,
+  );
   facilitator.register(BSV_NETWORK, bsvScheme);
 }
 
@@ -298,6 +330,27 @@ if (casperPrivateKey) {
   facilitator.register(CASPER_NETWORK, new ExactCasperScheme(casperSigner));
   console.info(
     `Casper Facilitator account: ${casperSigner.getAddresses(CASPER_NETWORK)[0]}`,
+  );
+}
+
+// Register Canton scheme if a participant + facilitator party are provided.
+if (cantonConfigured) {
+  const cantonSigner = toFacilitatorCantonSigner({
+    participantUrl: cantonParticipantUrl!,
+    token: cantonToken!,
+    userId: cantonUserId!,
+    synchronizerId: cantonSynchronizerId!,
+    facilitatorParties: [cantonFacilitatorParty!],
+  });
+  facilitator.register(
+    CANTON_NETWORK,
+    new ExactCantonScheme(cantonSigner, {
+      synchronizerId: cantonSynchronizerId!,
+      networks: [CANTON_NETWORK],
+    }),
+  );
+  console.info(
+    `Canton Facilitator party: ${cantonFacilitatorParty} on ${CANTON_NETWORK}`,
   );
 }
 

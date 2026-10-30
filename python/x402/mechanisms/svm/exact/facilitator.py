@@ -223,16 +223,15 @@ class ExactSvmScheme:
 
         # Version allowlist, checked before any signature or instruction check:
         # every check below reads its fee policy from version-specific structure.
-        if not is_accepted_transaction_version(
-            get_transaction_version(tx.message), self._transaction_versions
-        ):
+        version = get_transaction_version(tx.message)
+        if not is_accepted_transaction_version(version, self._transaction_versions):
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
             )
 
         # Size limit of the message version (§1.5): 1232 bytes for legacy and
         # version 0, 4096 for version 1. The decoder accepts larger payloads.
-        if transaction_size_exceeded(svm_payload.transaction, get_transaction_version(tx.message)):
+        if transaction_size_exceeded(svm_payload.transaction, version):
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_TRANSACTION_SIZE_EXCEEDED, payer=""
             )
@@ -241,9 +240,6 @@ class ExactSvmScheme:
         instructions = message.instructions
         static_accounts = list(message.account_keys)
 
-        # Instruction count and compute budget: a ComputeBudget prefix on
-        # legacy and version 0 (transfer at index 2), message.config on
-        # version 1 (transfer at index 0, no ComputeBudget instruction).
         budget_error, transfer_index = check_exact_compute_budget(message)
         if budget_error:
             return VerifyResponse(is_valid=False, invalid_reason=budget_error, payer="")

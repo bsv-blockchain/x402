@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from .....schemas import (
     SettleResultContext,
     SupportedKind,
 )
+from .....schemas.helpers import convert_to_token_amount, parse_money
 from .....schemas.hooks import (
     AbortResult,
     RecoveredSettleResult,
@@ -38,14 +40,20 @@ from .....schemas.hooks import (
     VerifyFailureContext,
     VerifyResultContext,
 )
-from ...utils import get_asset_info, get_network_config, parse_amount, parse_money_to_decimal
-from ..constants import MIN_WITHDRAW_DELAY, SCHEME_BATCH_SETTLEMENT
+from ...default_assets import find_default_asset, get_default_asset
+from ...utils import get_asset_info, parse_amount
+from ..constants import (
+    DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER,
+    MIN_WITHDRAW_DELAY,
+    SCHEME_BATCH_SETTLEMENT,
+)
 from ..types import AuthorizerSigner
 from .storage import Channel, ChannelStorage, InMemoryChannelStorage
 
-MoneyParser = Callable[[float, str], AssetAmount | None]
+MoneyParser = Callable[[str | int | float, str], AssetAmount | None]
 
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+_DIGITS = re.compile(r"^\d+$")
 
 
 @dataclass
@@ -54,6 +62,7 @@ class BatchSettlementEvmSchemeServerConfig:
     receiver_authorizer_signer: AuthorizerSigner | None = None
     withdraw_delay: int | None = None
     onchain_state_ttl_ms: int | None = None
+    enforce_min_deposit: bool | None = None
 
 
 @dataclass
@@ -62,6 +71,7 @@ class BatchSettlementRequestContext:
     pending_id: str | None = None
     channel_snapshot: Channel | None = None
     local_verify: bool = False
+    reservation_committed: bool = False
 
 
 def _default_onchain_state_ttl_ms(withdraw_delay_seconds: int) -> int:
@@ -79,6 +89,11 @@ class BatchSettlementEvmScheme:
     """
 
     scheme = SCHEME_BATCH_SETTLEMENT
+    default_asset_transfer_method = "eip3009"
+    payment_flows = {
+        "eip3009": {"supported": ("authorization",), "default": "authorization"},
+        "permit2": {"supported": ("authorization",), "default": "authorization"},
+    }
 
     def __init__(
         self,
@@ -97,6 +112,7 @@ class BatchSettlementEvmScheme:
             if cfg.onchain_state_ttl_ms is not None
             else _default_onchain_state_ttl_ms(self._withdraw_delay)
         )
+        self._enforce_min_deposit = cfg.enforce_min_deposit if cfg.enforce_min_deposit else False
         self._money_parsers: list[MoneyParser] = []
 
         self._request_lock = threading.Lock()
@@ -114,6 +130,10 @@ class BatchSettlementEvmScheme:
     def get_onchain_state_ttl_ms(self) -> int:
         return self._onchain_state_ttl_ms
 
+    def get_enforce_min_deposit(self) -> bool:
+        """Return whether deposits below the announced ``extra.minDeposit`` hint are rejected."""
+        return self._enforce_min_deposit
+
     def get_receiver_authorizer_signer(self) -> AuthorizerSigner | None:
         return self._receiver_authorizer_signer
 
@@ -121,13 +141,9 @@ class BatchSettlementEvmScheme:
         self._money_parsers.append(parser)
         return self
 
-    def get_asset_decimals(self, asset: str, network: Network) -> int:
-        try:
-            asset_info = get_asset_info(str(network), asset)
-            return asset_info["decimals"]
-        except ValueError:
-            pass
-        return 6
+    def get_asset_decimals(self, asset: str, network: Network) -> int | None:
+        found = find_default_asset(asset, str(network))
+        return found["decimals"] if found is not None else None
 
     def merge_request_context(
         self,
@@ -148,6 +164,8 @@ class BatchSettlementEvmScheme:
                 existing.channel_snapshot = context.channel_snapshot
             if context.local_verify:
                 existing.local_verify = context.local_verify
+            if context.reservation_committed:
+                existing.reservation_committed = True
 
     def read_request_context(self, payload: PaymentPayload) -> BatchSettlementRequestContext | None:
         with self._request_lock:
@@ -172,7 +190,7 @@ class BatchSettlementEvmScheme:
 
     def clear_pending_request(self, payload: PaymentPayload) -> None:
         ctx = self.take_request_context(payload)
-        if not ctx or not ctx.channel_id or not ctx.pending_id:
+        if not ctx or not ctx.reservation_committed or not ctx.channel_id or not ctx.pending_id:
             return
         snapshot = ctx.channel_snapshot
 
@@ -204,12 +222,14 @@ class BatchSettlementEvmScheme:
                 raise ValueError(f"Asset address required for AssetAmount on {network}")
             return price
 
-        decimal_amount = parse_money_to_decimal(price)
+        parsed = parse_money(price)
+        decimal_amount = parsed["amount"]
+        symbol = parsed.get("symbol")
         for parser in self._money_parsers:
             result = parser(decimal_amount, str(network))
             if result is not None:
                 return result
-        return self._default_money_conversion(decimal_amount, str(network))
+        return self._default_money_conversion(decimal_amount, str(network), symbol)
 
     def enhance_payment_requirements(
         self,
@@ -218,14 +238,8 @@ class BatchSettlementEvmScheme:
         _extension_keys: list[str],
     ) -> PaymentRequirements:
 
-        config = get_network_config(str(requirements.network))
         if not requirements.asset:
-            default = config.get("default_asset")
-            if not default or not default.get("address"):
-                raise ValueError(
-                    f"No default stablecoin configured for network {requirements.network}"
-                )
-            requirements.asset = default["address"]
+            requirements.asset = get_default_asset(str(requirements.network))["asset"]
 
         try:
             asset_info = get_asset_info(str(requirements.network), requirements.asset)
@@ -264,8 +278,53 @@ class BatchSettlementEvmScheme:
             if "assetTransferMethod" not in extra and atm:
                 extra["assetTransferMethod"] = atm
 
+        extra["minDeposit"] = self.resolve_min_deposit_hint(requirements)
+
         requirements.extra = extra
         return requirements
+
+    def resolve_min_deposit_hint(self, payment_requirements: PaymentRequirements) -> str:
+        """Resolve the ``extra.minDeposit`` hint written on every 402."""
+        amount = int(payment_requirements.amount)
+        extra = payment_requirements.extra or {}
+        route_override = extra.get("minDeposit")
+
+        configured_min: int | None = None
+        if isinstance(route_override, str):
+            if _DIGITS.fullmatch(route_override):
+                configured_min = self._parse_atomic_min_deposit(route_override)
+            else:
+                configured_min = self._resolve_route_money_min_deposit(
+                    route_override, payment_requirements
+                )
+
+        if configured_min is None:
+            return str(amount * DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER)
+
+        return str(amount if amount > configured_min else configured_min)
+
+    def _resolve_route_money_min_deposit(self, money: str, requirement: PaymentRequirements) -> int:
+        """Convert a route-level Money ``extra.minDeposit`` override to atomic units."""
+        default_asset = find_default_asset(requirement.asset, str(requirement.network))
+        if not default_asset:
+            raise ValueError(
+                "extra.minDeposit money values are only supported for default assets; "
+                f"use an integer atomic string for {requirement.asset} on {requirement.network}."
+            )
+
+        parsed = parse_money(money)
+        return self._parse_atomic_min_deposit(
+            convert_to_token_amount(parsed["amount"], default_asset["decimals"])
+        )
+
+    def _parse_atomic_min_deposit(self, amount: str) -> int:
+        """Validate and normalize an atomic min deposit amount."""
+        if not _DIGITS.fullmatch(amount):
+            raise ValueError("minDeposit must resolve to a positive integer")
+        value = int(amount)
+        if value <= 0:
+            raise ValueError("minDeposit must resolve to a positive integer")
+        return value
 
     def validate_facilitator_support(
         self,
@@ -298,24 +357,23 @@ class BatchSettlementEvmScheme:
             "facilitator that advertises one."
         )
 
-    def _default_money_conversion(self, amount: float, network: str) -> AssetAmount:
-        config = get_network_config(network)
-        asset = config.get("default_asset")
-        if not asset or not asset.get("address"):
-            raise ValueError(f"No default stablecoin configured for network {network}")
-        token_amount = int(amount * (10 ** asset["decimals"]))
+    def _default_money_conversion(
+        self, amount: str, network: str, symbol: str | None = None
+    ) -> AssetAmount:
+        asset = get_default_asset(network, symbol)
+        token_amount = convert_to_token_amount(amount, asset["decimals"])
         atm = asset.get("asset_transfer_method")
         extra: dict[str, Any] = {"name": asset["name"], "version": asset["version"]}
         if atm:
             extra["assetTransferMethod"] = atm
-        return AssetAmount(amount=str(token_amount), asset=asset["address"], extra=extra)
+        return AssetAmount(amount=str(token_amount), asset=asset["asset"], extra=extra)
 
     def before_verify(self, context: VerifyContext) -> AbortResult | SkipVerifyResult | None:
         from .verify import handle_before_verify
 
         return handle_before_verify(self, context)
 
-    def after_verify(self, context: VerifyResultContext) -> SkipHandlerResult | None:
+    def after_verify(self, context: VerifyResultContext) -> AbortResult | SkipHandlerResult | None:
         from .verify import handle_after_verify
 
         return handle_after_verify(self, context)
@@ -383,9 +441,7 @@ class BatchSettlementEvmScheme:
                 "Use create_channel_manager_sync with a sync facilitator client."
             )
 
-        config = get_network_config(str(network))
-        default_asset = config.get("default_asset") or {}
-        token = default_asset.get("address")
+        token = get_default_asset(str(network))["asset"]
         if not token:
             raise ValueError(f"No default asset configured for network {network}")
         return BatchSettlementChannelManager(
@@ -417,9 +473,7 @@ class BatchSettlementEvmScheme:
                 "Use create_channel_manager with an async facilitator client."
             )
 
-        config = get_network_config(str(network))
-        default_asset = config.get("default_asset") or {}
-        token = default_asset.get("address")
+        token = get_default_asset(str(network))["asset"]
         if not token:
             raise ValueError(f"No default asset configured for network {network}")
         return BatchSettlementChannelManagerSync(

@@ -7,7 +7,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from ..schemas.hooks import PaymentCancellationDispatcher, ProtectedRequestHookResult
+from ..schemas.hooks import (
+    CompletedSettlement,
+    PaymentCancellationDispatcher,
+    ProtectedRequestHookResult,
+)
 
 if TYPE_CHECKING:
     from ..schemas import (
@@ -15,6 +19,7 @@ if TYPE_CHECKING:
         PaymentPayload,
         PaymentRequirements,
         Price,
+        SettleResponse,
     )
 
 
@@ -80,6 +85,9 @@ class HTTPRequestContext:
     method: str
     payment_header: str | None = None
     route_pattern: str | None = None
+    # The framework's own decoded routing view of the path (e.g. Starlette's
+    # ``request.url.path`` or Werkzeug's ``PATH_INFO``), if distinct from ``path``.
+    decoded_path: str | None = None
 
 
 @dataclass
@@ -117,6 +125,7 @@ class HTTPProcessResult:
     payment_requirements: PaymentRequirements | None = None
     declared_extensions: dict[str, Any] | None = None
     cancellation_dispatcher: PaymentCancellationDispatcher | None = None
+    before_handler_settlement: CompletedSettlement | None = None
 
 
 @dataclass
@@ -130,6 +139,7 @@ class ProcessSettleResult:
     network: str | None = None
     payer: str | None = None
     response: HTTPResponseInstructions | None = None  # Only set when success=False
+    settle_response: SettleResponse | None = None
 
 
 # ============================================================================
@@ -145,6 +155,11 @@ class PaywallConfig:
     (e.g. ``"eip155:84532"``). Wins over the paywall's curated default map for
     the matching chain. Unmapped chains render "No faucet configured." rather
     than a fallback link.
+
+    ``rpc_urls`` is a per-chain RPC endpoint the paywall uses from the browser,
+    keyed by CAIP-2 network identifier. Currently read by the SVM paywall only;
+    chains without an entry use the public default. The URLs are visible to
+    every visitor, so use browser-safe endpoints, never secret keys.
     """
 
     app_name: str | None = None
@@ -153,6 +168,7 @@ class PaywallConfig:
     current_url: str | None = None
     testnet: bool = False
     faucet_urls: dict[str, str] | None = None
+    rpc_urls: dict[str, str] | None = None
 
 
 # Dynamic function types (supports both sync and async callbacks)
@@ -248,7 +264,12 @@ class RouteValidationError:
     route_pattern: str
     scheme: str
     network: str
-    reason: Literal["missing_scheme", "missing_facilitator"]
+    reason: Literal[
+        "missing_scheme",
+        "missing_facilitator",
+        "unsupported_asset_transfer_method",
+        "unsupported_payment_flow",
+    ]
     message: str
 
 

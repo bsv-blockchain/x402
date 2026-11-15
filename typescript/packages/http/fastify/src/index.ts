@@ -9,10 +9,13 @@ import {
   FacilitatorClient,
   FacilitatorResponseError,
   getFacilitatorResponseError,
+  prepareHttpServer,
   SETTLEMENT_OVERRIDES_HEADER,
   SettlementOverrides,
   checkIfBazaarNeeded,
   PaymentCancellationDispatcher,
+  CompletedSettlement,
+  withPrivateCacheControl,
 } from "@x402/core/server";
 import {
   SchemeNetworkServer,
@@ -36,6 +39,7 @@ export function setSettlementOverrides(reply: FastifyReply, overrides: Settlemen
 
 interface X402PaymentContext {
   cancellationDispatcher: PaymentCancellationDispatcher;
+  beforeHandlerSettlement?: CompletedSettlement;
   paymentPayload: PaymentPayload;
   paymentRequirements: PaymentRequirements;
   declaredExtensions?: Record<string, unknown>;
@@ -187,6 +191,7 @@ function guardReplyRaw(reply: FastifyReply): RawGuard {
       const data =
         typeof args[0] === "function" ? undefined : (args[0] as string | Buffer | undefined);
       guard.buffer.push({ method: "end", data });
+      reply.send();
       return this;
     }
     return Reflect.apply(origEnd, this, args) as ServerResponse;
@@ -212,6 +217,31 @@ function guardReplyRaw(reply: FastifyReply): RawGuard {
  */
 function sendFacilitatorError(reply: FastifyReply, error: FacilitatorResponseError): void {
   reply.status(502).send({ error: error.message });
+}
+
+/**
+ * Logs an unexpected error and sends a generic 500 without leaking internals.
+ *
+ * @param reply - The Fastify reply to write to
+ * @param error - The unexpected error
+ */
+function sendInternalError(reply: FastifyReply, error: unknown): void {
+  console.error(error);
+  reply.status(500).send({ error: "Internal Server Error" });
+}
+
+/**
+ * Decode percent-escapes in a request path.
+ *
+ * @param path - Request path
+ * @returns Decoded path, or the original if decoding fails
+ */
+function decodedRoutePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
 }
 
 /**
@@ -260,36 +290,14 @@ export function paymentMiddlewareFromHTTPServer(
   paywall?: PaywallProvider,
   syncFacilitatorOnStart: boolean = true,
 ): void {
-  if (paywall) {
-    httpServer.registerPaywallProvider(paywall);
-  }
-
   app.decorateRequest("x402Context", undefined);
   app.decorateRequest("x402RawGuard", undefined);
 
-  let initPromise: Promise<void> | null = syncFacilitatorOnStart ? httpServer.initialize() : null;
-  let isInitialized = false;
-
-  /**
-   * Ensures facilitator initialization succeeds once, while allowing retries after failures.
-   */
-  async function initializeHttpServer(): Promise<void> {
-    if (!syncFacilitatorOnStart || isInitialized) {
-      return;
-    }
-
-    if (!initPromise) {
-      initPromise = httpServer.initialize();
-    }
-
-    try {
-      await initPromise;
-      isInitialized = true;
-    } catch (error) {
-      initPromise = null;
-      throw error;
-    }
-  }
+  const { init: initializeHttpServer } = prepareHttpServer(
+    httpServer,
+    paywall,
+    syncFacilitatorOnStart,
+  );
 
   let bazaarPromise: Promise<void> | null = null;
   if (checkIfBazaarNeeded(httpServer.routes)) {
@@ -311,11 +319,19 @@ export function paymentMiddlewareFromHTTPServer(
   }
 
   app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
+    // find-my-way 9.5-9.8 and 9.9+ (both allowed by fastify ^5) resolve absolute-form and other
+    // non-origin-form request-targets to different paths, so the gate cannot mirror the router.
+    // Reject them before route matching instead.
+    if (request.url.charCodeAt(0) !== 47 /* "/" */) {
+      return reply.status(400).send({ error: "Bad Request" });
+    }
+
     const path = request.url.split("?")[0];
     const adapter = new FastifyAdapter(request);
     const context: HTTPRequestContext = {
       adapter,
       path,
+      decodedPath: decodedRoutePath(path),
       method: request.method,
       paymentHeader:
         (request.headers["payment-signature"] as string | undefined) ||
@@ -326,7 +342,7 @@ export function paymentMiddlewareFromHTTPServer(
       return;
     }
 
-    if (syncFacilitatorOnStart && !isInitialized) {
+    if (syncFacilitatorOnStart) {
       try {
         await initializeHttpServer();
       } catch (error) {
@@ -334,7 +350,7 @@ export function paymentMiddlewareFromHTTPServer(
         if (facilitatorError) {
           return sendFacilitatorError(reply, facilitatorError);
         }
-        throw error;
+        return sendInternalError(reply, error);
       }
     }
 
@@ -350,7 +366,7 @@ export function paymentMiddlewareFromHTTPServer(
       if (error instanceof FacilitatorResponseError) {
         return sendFacilitatorError(reply, error);
       }
-      throw error;
+      return sendInternalError(reply, error);
     }
 
     switch (result.type) {
@@ -372,6 +388,7 @@ export function paymentMiddlewareFromHTTPServer(
       case "payment-verified": {
         request.x402Context = {
           cancellationDispatcher: result.cancellationDispatcher,
+          beforeHandlerSettlement: result.beforeHandlerSettlement,
           paymentPayload: result.paymentPayload,
           paymentRequirements: result.paymentRequirements,
           declaredExtensions: result.declaredExtensions,
@@ -419,14 +436,29 @@ export function paymentMiddlewareFromHTTPServer(
       if (bodyChunks.length > 0) {
         effectivePayload = Buffer.concat(bodyChunks);
       }
+      // Error responses can re-enter onSend; do not replay the original response.
+      rawGuard.buffer.length = 0;
     }
 
     if (reply.statusCode >= 400) {
-      await x402Context.cancellationDispatcher.cancel({
+      const cancelSettlement = await x402Context.cancellationDispatcher.cancel({
         reason: "handler_failed",
         responseStatus: reply.statusCode,
       });
       reply.removeHeader(SETTLEMENT_OVERRIDES_HEADER);
+      const existingCacheControl =
+        reply.getHeader("Cache-Control") != null ? String(reply.getHeader("Cache-Control")) : null;
+      const failureHeaders = httpServer.createFailurePathSettlementHeaders(
+        cancelSettlement,
+        x402Context.beforeHandlerSettlement,
+        x402Context.paymentPayload,
+        existingCacheControl,
+      );
+      if (failureHeaders) {
+        for (const [key, value] of Object.entries(failureHeaders)) {
+          reply.header(key, value);
+        }
+      }
       return effectivePayload;
     }
 
@@ -445,6 +477,8 @@ export function paymentMiddlewareFromHTTPServer(
         x402Context.paymentRequirements,
         x402Context.declaredExtensions,
         { request: x402Context.requestContext, responseBody, responseHeaders },
+        undefined,
+        x402Context.beforeHandlerSettlement,
       );
 
       if (!settleResult.success) {
@@ -464,6 +498,14 @@ export function paymentMiddlewareFromHTTPServer(
       for (const [key, value] of Object.entries(settleResult.headers)) {
         reply.header(key, value);
       }
+      reply.header(
+        "Cache-Control",
+        withPrivateCacheControl(
+          reply.getHeader("Cache-Control") != null
+            ? String(reply.getHeader("Cache-Control"))
+            : null,
+        ),
+      );
       reply.removeHeader(SETTLEMENT_OVERRIDES_HEADER);
       return effectivePayload;
     } catch (error) {

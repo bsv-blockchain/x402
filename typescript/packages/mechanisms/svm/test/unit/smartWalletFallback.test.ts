@@ -3,7 +3,6 @@ import {
   appendTransactionMessageInstruction,
   createTransactionMessage,
   generateKeyPairSigner,
-  getBase64EncodedWireTransaction,
   getCompiledTransactionMessageEncoder,
   pipe,
   setTransactionMessageFeePayer,
@@ -16,8 +15,10 @@ import {
   LIGHTHOUSE_PROGRAM_ADDRESS,
   MEMO_PROGRAM_ADDRESS,
   SOLANA_DEVNET_CAIP2,
-  USDC_DEVNET_ADDRESS,
 } from "../../src/constants";
+import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
+import { encodeSignedTransaction, placeholderFeePayerSignature } from "./helpers/signedTransaction";
+import * as Errors from "../../src/exact/facilitator/errors";
 
 const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111" as Address;
 const SWIG_PROGRAM = "swigypWHEksbC64pWKwah1WTeh9JXwx8H1rJHLdbQMB" as Address;
@@ -63,9 +64,17 @@ async function buildTransaction(feePayer: Address, instructions: IInstruction[])
   return { messageBytes, signatures: {} };
 }
 
-async function buildSmartWalletPayload(feePayer: Address, unknownProgram: Address, payer: Address) {
+async function buildSmartWalletPayload(
+  feePayer: Address,
+  unknownProgram: Address,
+  payer: Address,
+  computeUnits = 100_000,
+) {
+  const limitData = new Uint8Array(5);
+  limitData[0] = 2;
+  new DataView(limitData.buffer).setUint32(1, computeUnits, true);
   const tx = await buildTransaction(feePayer, [
-    { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array([2, 160, 134, 1, 0]) },
+    { programAddress: COMPUTE_BUDGET_PROGRAM, data: limitData },
     { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array([3, 16, 39, 0, 0, 0, 0, 0, 0]) },
     {
       programAddress: unknownProgram,
@@ -74,12 +83,7 @@ async function buildSmartWalletPayload(feePayer: Address, unknownProgram: Addres
     },
   ]);
 
-  const txWithSig = {
-    messageBytes: tx.messageBytes,
-    signatures: { [feePayer]: new Uint8Array(64) } as Record<string, Uint8Array>,
-  };
-
-  return getBase64EncodedWireTransaction(txWithSig as never);
+  return encodeSignedTransaction(tx.messageBytes, [], placeholderFeePayerSignature(feePayer));
 }
 
 async function buildSmartWalletPayloadWithMemos(
@@ -107,12 +111,7 @@ async function buildSmartWalletPayloadWithMemos(
 
   const tx = await buildTransaction(feePayer, baseInstructions);
 
-  const txWithSig = {
-    messageBytes: tx.messageBytes,
-    signatures: { [feePayer]: new Uint8Array(64) } as Record<string, Uint8Array>,
-  };
-
-  return getBase64EncodedWireTransaction(txWithSig as never);
+  return encodeSignedTransaction(tx.messageBytes, [], placeholderFeePayerSignature(feePayer));
 }
 
 /**
@@ -126,12 +125,13 @@ async function buildStaticTransferPayload(args: {
   source: Address;
   mint: Address;
   destination: Address;
-  authority: Address;
+  authority: { address: Address; signMessages: (messages: never[]) => Promise<unknown[]> };
   amount: bigint;
+  discriminator?: number;
   trailing?: IInstruction[];
 }) {
   const data = new Uint8Array(10);
-  data[0] = 12; // TransferChecked discriminator
+  data[0] = args.discriminator ?? 12;
   new DataView(data.buffer).setBigUint64(1, args.amount, true);
   data[9] = 6; // decimals
 
@@ -146,22 +146,18 @@ async function buildStaticTransferPayload(args: {
         { address: args.destination, role: 1 },
         // Authority is a signer (role 3), so the compiled message requires its
         // signature slot in addition to the fee payer's.
-        { address: args.authority, role: 3 },
+        { address: args.authority.address, role: 3 },
       ],
       data,
     },
     ...(args.trailing ?? []),
   ]);
 
-  const txWithSig = {
-    messageBytes: tx.messageBytes,
-    signatures: {
-      [args.feePayer]: new Uint8Array(64),
-      [args.authority]: new Uint8Array(64),
-    } as Record<string, Uint8Array>,
-  };
-
-  return getBase64EncodedWireTransaction(txWithSig as never);
+  return encodeSignedTransaction(
+    tx.messageBytes,
+    [args.authority],
+    placeholderFeePayerSignature(args.feePayer),
+  );
 }
 
 function buildMockInnerTransfer(
@@ -205,6 +201,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -280,6 +277,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -337,6 +335,8 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     expect(result.isValid).toBe(true);
     expect(result.payer).toBe(payer.address);
+    expect(result).not.toHaveProperty("matchedTransfer");
+    expect(() => JSON.stringify(result)).not.toThrow();
     expect(mockSigner.simulateTransactionWithInnerInstructions).toHaveBeenCalled();
   });
 
@@ -359,6 +359,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -423,7 +424,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
     );
 
     expect(result.isValid).toBe(false);
-    expect(result.invalidReason).toBe("smart_wallet_multiple_matching_transfers");
+    expect(result.invalidReason).toBe(Errors.ErrSmartWalletMultipleMatchingTransfers);
   });
 
   it("verify rejects smart wallet transaction when fee payer is transfer authority", async () => {
@@ -447,6 +448,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -525,6 +527,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -568,7 +571,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
     );
 
     expect(result.isValid).toBe(false);
-    expect(result.invalidReason).toContain("smart_wallet_program_not_allowed");
+    expect(result.invalidReason).toContain(Errors.ErrSmartWalletProgramNotAllowed);
   });
 
   it("verify accepts smart wallet transaction when required memo is present and matches", async () => {
@@ -591,6 +594,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -669,6 +673,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -747,6 +752,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -825,6 +831,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -883,6 +890,67 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
     expect(result.invalidReason).toBe("invalid_exact_svm_payload_memo_count");
   });
 
+  it("verify rejects ApproveChecked (discriminator 13) as a TransferChecked lookalike", async () => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const payer = await generateKeyPairSigner();
+    const source = await generateKeyPairSigner();
+
+    const expectedAta = payTo.address;
+    mockAtaMap[payTo.address] = expectedAta;
+
+    const txBase64 = await buildStaticTransferPayload({
+      feePayer: feePayer.address,
+      source: source.address,
+      mint: USDC_DEVNET_ADDRESS as Address,
+      destination: expectedAta,
+      authority: payer,
+      amount: 100000n,
+      discriminator: 13, // ApproveChecked
+    });
+
+    const mockSigner = {
+      getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      signTransaction: vi.fn().mockResolvedValue(txBase64),
+      simulateTransaction: vi.fn().mockResolvedValue(undefined),
+      sendTransaction: vi.fn(),
+      confirmTransaction: vi.fn(),
+      getConfirmedTransactionInnerInstructions: vi.fn().mockResolvedValue(null),
+      getTokenAccountBalance: vi.fn().mockResolvedValue(null),
+      fetchAddressLookupTables: vi.fn().mockResolvedValue({}),
+      simulateTransactionWithInnerInstructions: vi
+        .fn()
+        .mockResolvedValue({ innerInstructions: [] }),
+    };
+
+    const scheme = new ExactSvmScheme(mockSigner as never);
+
+    const accepted = {
+      scheme: "exact",
+      network: SOLANA_DEVNET_CAIP2,
+      asset: USDC_DEVNET_ADDRESS,
+      amount: "100000",
+      payTo: payTo.address,
+      maxTimeoutSeconds: 3600,
+      extra: { feePayer: feePayer.address },
+    };
+
+    const result = await scheme.verify(
+      {
+        x402Version: 2,
+        resource: { url: "http://test.com", description: "test", mimeType: "application/json" },
+        accepted,
+        payload: { transaction: txBase64 },
+      } as never,
+      accepted as never,
+    );
+
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe("invalid_exact_svm_payload_unknown_instruction");
+  });
+
   it("verify does NOT fall through to Path 2 on a semantic (amount mismatch) failure", async () => {
     const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
 
@@ -901,12 +969,13 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
       source: source.address,
       mint: USDC_DEVNET_ADDRESS as Address,
       destination: expectedAta,
-      authority: payer.address,
+      authority: payer,
       amount: 1n,
     });
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -971,6 +1040,7 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -1041,20 +1111,21 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
     // Lighthouse assertions in the optional tail = 7 instructions total (see #2097).
     const lighthouse: IInstruction = {
       programAddress: LIGHTHOUSE_PROGRAM_ADDRESS as Address,
-      data: new Uint8Array([0]),
+      data: new Uint8Array([2]),
     };
     const txBase64 = await buildStaticTransferPayload({
       feePayer: feePayer.address,
       source: source.address,
       mint: USDC_DEVNET_ADDRESS as Address,
       destination: expectedAta,
-      authority: payer.address,
+      authority: payer,
       amount: 100000n,
       trailing: [lighthouse, lighthouse, lighthouse],
     });
 
     const mockSigner = {
       getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
       signTransaction: vi.fn().mockResolvedValue(txBase64),
       simulateTransaction: vi.fn().mockResolvedValue(undefined),
       sendTransaction: vi.fn(),
@@ -1095,5 +1166,360 @@ describe("ExactSvmScheme smart wallet fallback path", () => {
     expect(result.isValid).toBe(true);
     expect(result.payer).toBe(payer.address);
     expect(mockSigner.simulateTransactionWithInnerInstructions).not.toHaveBeenCalled();
+  });
+});
+
+describe("ExactSvmScheme pending-settlement reconciliation for smart wallet settlements", () => {
+  beforeEach(() => {
+    mockAtaMap = {};
+    vi.clearAllMocks();
+  });
+
+  it("cache-hit reconciliation runs verifyPostSettlement and rejects an unconfirmed transfer (TOCTOU defense)", async () => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+    const { InMemoryPendingSettlementStore } = await import("@x402/core/facilitator");
+    const { decodeTransactionFromPayload, transactionMessageHash } = await import(
+      "../../src/utils"
+    );
+
+    const feePayer = await generateKeyPairSigner();
+    const unknownProgram = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const payer = await generateKeyPairSigner();
+
+    // A non-static-transfer-shaped transaction (unknown program at index 2), so
+    // the reconciliation path's cheap `hasStaticTransferLayout` re-derivation
+    // correctly infers this was originally a Path-2 (smart wallet) settlement.
+    const txBase64 = await buildSmartWalletPayload(
+      feePayer.address,
+      unknownProgram.address,
+      payer.address,
+    );
+
+    const accepted = {
+      scheme: "exact",
+      network: SOLANA_DEVNET_CAIP2,
+      asset: USDC_DEVNET_ADDRESS,
+      amount: "100000",
+      payTo: payTo.address,
+      maxTimeoutSeconds: 3600,
+      extra: { feePayer: feePayer.address },
+    };
+    const txKey = transactionMessageHash(decodeTransactionFromPayload({ transaction: txBase64 }));
+    const store = new InMemoryPendingSettlementStore();
+    await store.set(txKey, "CachedSmartWalletSig1111111111111111111111");
+
+    const mockSigner = {
+      getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
+      signTransaction: vi.fn(),
+      sendTransaction: vi.fn(),
+      simulateTransaction: vi.fn(),
+      confirmTransaction: vi.fn().mockResolvedValue(undefined),
+      // No matching TransferChecked found post-confirmation, and no balance
+      // snapshot is available during reconciliation: verifyPostSettlement
+      // must report unverified rather than the reconciliation path skipping
+      // the check entirely.
+      getConfirmedTransactionInnerInstructions: vi.fn().mockResolvedValue(null),
+      getTokenAccountBalance: vi.fn().mockResolvedValue(null),
+      fetchAddressLookupTables: vi.fn().mockResolvedValue({}),
+      simulateTransactionWithInnerInstructions: vi.fn(),
+    };
+
+    const scheme = new ExactSvmScheme(mockSigner as never, undefined, {
+      pendingSettlementStore: store,
+      enableSmartWalletVerification: true,
+    });
+
+    const result = await scheme.settle(
+      {
+        x402Version: 2,
+        accepted,
+        payload: { transaction: txBase64 },
+      } as never,
+      accepted as never,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorReason).toBe("post_settlement_transfer_not_confirmed");
+    expect(mockSigner.confirmTransaction).toHaveBeenCalledWith(
+      "CachedSmartWalletSig1111111111111111111111",
+      SOLANA_DEVNET_CAIP2,
+    );
+    // Reconciliation must not re-verify/re-sign/re-send.
+    expect(mockSigner.signTransaction).not.toHaveBeenCalled();
+    expect(mockSigner.sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("verify never calls signTransaction and simulates the unsigned payload", async () => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const source = await generateKeyPairSigner();
+    const payer = await generateKeyPairSigner();
+    const expectedAta = payTo.address;
+    mockAtaMap[payTo.address] = expectedAta;
+
+    const txBase64 = await buildStaticTransferPayload({
+      feePayer: feePayer.address,
+      source: source.address,
+      mint: USDC_DEVNET_ADDRESS as Address,
+      destination: expectedAta,
+      authority: payer,
+      amount: 100000n,
+    });
+
+    const mockSigner = {
+      getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      signTransaction: vi.fn().mockResolvedValue(txBase64),
+      simulateTransaction: vi.fn().mockResolvedValue(undefined),
+      sendTransaction: vi.fn(),
+      confirmTransaction: vi.fn(),
+      getConfirmedTransactionInnerInstructions: vi.fn().mockResolvedValue(null),
+      getTokenAccountBalance: vi.fn().mockResolvedValue(null),
+      fetchAddressLookupTables: vi.fn().mockResolvedValue({}),
+      simulateTransactionWithInnerInstructions: vi
+        .fn()
+        .mockResolvedValue({ innerInstructions: [] }),
+    };
+
+    const scheme = new ExactSvmScheme(mockSigner as never);
+    const accepted = {
+      scheme: "exact",
+      network: SOLANA_DEVNET_CAIP2,
+      asset: USDC_DEVNET_ADDRESS,
+      amount: "100000",
+      payTo: payTo.address,
+      maxTimeoutSeconds: 3600,
+      extra: { feePayer: feePayer.address },
+    };
+
+    const result = await scheme.verify(
+      {
+        x402Version: 2,
+        resource: { url: "http://test.com", description: "test", mimeType: "application/json" },
+        accepted,
+        payload: { transaction: txBase64 },
+      } as never,
+      accepted as never,
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(mockSigner.signTransaction).not.toHaveBeenCalled();
+    expect(mockSigner.simulateTransaction).toHaveBeenCalledWith(txBase64, SOLANA_DEVNET_CAIP2);
+  });
+
+  it("ALT transactions reach Path 2 instead of throwing", async () => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+
+    const feePayer = await generateKeyPairSigner();
+    const altAddr = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    mockAtaMap[payTo.address] = payTo.address;
+
+    const compiled = {
+      version: 0 as const,
+      header: {
+        numSignerAccounts: 1,
+        numReadonlySignerAccounts: 0,
+        numReadonlyNonSignerAccounts: 1,
+      },
+      staticAccounts: [feePayer.address, SWIG_PROGRAM],
+      lifetimeToken: "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      instructions: [
+        {
+          programAddressIndex: 1,
+          accountIndices: [2],
+          data: new Uint8Array([0]),
+        },
+      ],
+      addressTableLookups: [
+        {
+          lookupTableAddress: altAddr.address,
+          writableIndexes: [0],
+          readonlyIndexes: [],
+        },
+      ],
+    };
+
+    const messageBytes = getCompiledTransactionMessageEncoder().encode(compiled);
+    const txBase64 = await encodeSignedTransaction(
+      messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+
+    const mockSigner = {
+      getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      signTransaction: vi.fn(),
+      simulateTransaction: vi.fn().mockResolvedValue(undefined),
+      sendTransaction: vi.fn(),
+      confirmTransaction: vi.fn(),
+      getConfirmedTransactionInnerInstructions: vi.fn().mockResolvedValue(null),
+      getTokenAccountBalance: vi.fn().mockResolvedValue(null),
+      fetchAddressLookupTables: vi.fn().mockResolvedValue({
+        [altAddr.address]: [payTo.address],
+      }),
+      simulateTransactionWithInnerInstructions: vi.fn().mockResolvedValue({
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              buildMockInnerTransfer(
+                TOKEN_PROGRAM,
+                USDC_DEVNET_ADDRESS,
+                payTo.address as string,
+                payTo.address as string,
+                "100000",
+              ),
+            ],
+          },
+        ],
+      }),
+    };
+
+    const scheme = new ExactSvmScheme(mockSigner as never, undefined, {
+      enableSmartWalletVerification: true,
+    });
+    const accepted = {
+      scheme: "exact",
+      network: SOLANA_DEVNET_CAIP2,
+      asset: USDC_DEVNET_ADDRESS,
+      amount: "100000",
+      payTo: payTo.address,
+      maxTimeoutSeconds: 3600,
+      extra: { feePayer: feePayer.address },
+    };
+
+    const result = await scheme.verify(
+      {
+        x402Version: 2,
+        resource: { url: "http://test.com", description: "test", mimeType: "application/json" },
+        accepted,
+        payload: { transaction: txBase64 },
+      } as never,
+      accepted as never,
+    );
+
+    expect(result.isValid).toBe(true);
+    expect(mockSigner.simulateTransactionWithInnerInstructions).toHaveBeenCalled();
+    expect(mockSigner.fetchAddressLookupTables).toHaveBeenCalled();
+  });
+});
+
+describe("ExactSvmScheme smart wallet compute-unit caps", () => {
+  beforeEach(() => {
+    mockAtaMap = {};
+    vi.clearAllMocks();
+  });
+
+  /**
+   * Verifies a 500,000-CU smart-wallet transaction under the given options.
+   *
+   * @param options - Facilitator options, merged over smart wallet verification enabled
+   * @param allowlistWallet - Whether the wallet program is on the smart-wallet allowlist
+   * @returns The verify response and the simulation mock
+   */
+  async function verifyHighComputeSmartWallet(
+    options: Record<string, unknown>,
+    allowlistWallet = true,
+  ) {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+    const feePayer = await generateKeyPairSigner();
+    const walletProgram = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const payer = await generateKeyPairSigner();
+    mockAtaMap[payTo.address] = payTo.address;
+
+    const txBase64 = await buildSmartWalletPayload(
+      feePayer.address,
+      walletProgram.address,
+      payer.address,
+      500_000,
+    );
+    const simulate = vi.fn().mockResolvedValue({
+      innerInstructions: [
+        {
+          index: 0,
+          instructions: [
+            buildMockInnerTransfer(
+              TOKEN_PROGRAM,
+              USDC_DEVNET_ADDRESS,
+              payTo.address,
+              payer.address as string,
+              "100000",
+            ),
+          ],
+        },
+      ],
+    });
+    const mockSigner = {
+      getAddresses: vi.fn().mockReturnValue([feePayer.address]),
+      getSigner: vi.fn().mockReturnValue(feePayer),
+      signTransaction: vi.fn().mockResolvedValue(txBase64),
+      simulateTransaction: vi.fn().mockResolvedValue(undefined),
+      sendTransaction: vi.fn(),
+      confirmTransaction: vi.fn(),
+      getConfirmedTransactionInnerInstructions: vi.fn().mockResolvedValue(null),
+      getTokenAccountBalance: vi.fn().mockResolvedValue(null),
+      fetchAddressLookupTables: vi.fn().mockResolvedValue({}),
+      simulateTransactionWithInnerInstructions: simulate,
+    };
+    const scheme = new ExactSvmScheme(mockSigner as never, undefined, {
+      enableSmartWalletVerification: true,
+      smartWalletAllowedPrograms: allowlistWallet
+        ? [walletProgram.address]
+        : ["SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf"],
+      ...options,
+    });
+    const requirements = {
+      scheme: "exact",
+      network: SOLANA_DEVNET_CAIP2,
+      asset: USDC_DEVNET_ADDRESS,
+      amount: "100000",
+      payTo: payTo.address,
+      maxTimeoutSeconds: 3600,
+      extra: { feePayer: feePayer.address },
+    };
+    const result = await scheme.verify(
+      { x402Version: 2, accepted: requirements, payload: { transaction: txBase64 } } as never,
+      requirements as never,
+    );
+    return { result, simulate };
+  }
+
+  it("judges a smart wallet above the default static cap against smartWalletMaxComputeUnits", async () => {
+    const { result, simulate } = await verifyHighComputeSmartWallet({
+      smartWalletMaxComputeUnits: 1_000_000,
+    });
+    expect(result.isValid).toBe(true);
+    expect(simulate).toHaveBeenCalled();
+  });
+
+  it("reports the smart-wallet cap when the transaction exceeds both defaults", async () => {
+    const { result } = await verifyHighComputeSmartWallet({});
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toContain(Errors.ErrSmartWalletComputeUnitsTooHigh);
+  });
+
+  it("keeps an explicit maxComputeUnits a hard ceiling for both paths", async () => {
+    const { result, simulate } = await verifyHighComputeSmartWallet({
+      maxComputeUnits: 400_000,
+      smartWalletMaxComputeUnits: 1_000_000,
+    });
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe(Errors.ErrComputeLimitInstructionTooHigh);
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the static reason when no allowlisted wallet program is invoked", async () => {
+    const { result, simulate } = await verifyHighComputeSmartWallet(
+      { smartWalletMaxComputeUnits: 1_000_000 },
+      false,
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe(Errors.ErrComputeLimitInstructionTooHigh);
+    expect(simulate).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
 import { ExactSvmScheme } from "../../src/exact/server/scheme";
 import { MoneyParser } from "@x402/core/types";
+import { convertToTokenAmount } from "@x402/core/utils";
 
 describe("ExactSvmScheme - registerMoneyParser", () => {
   describe("Single custom parser", () => {
@@ -9,9 +11,9 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
 
       const customParser: MoneyParser = async (amount, _network) => {
         // Custom logic: different conversion for large amounts
-        if (amount > 100) {
+        if (Number(amount) > 100) {
           return {
-            amount: (amount * 1e9).toString(), // Custom decimals
+            amount: convertToTokenAmount(String(amount), 9), // Custom decimals
             asset: "CustomTokenMint1111111111111111111111",
             extra: { token: "CUSTOM", tier: "large" },
           };
@@ -29,13 +31,13 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
 
       // Small amount should fall back to default (USDC)
       const result2 = await server.parsePrice(50, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(result2.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // Mainnet USDC
+      expect(result2.asset).toBe(USDC_MAINNET_ADDRESS);
       expect(result2.amount).toBe("50000000"); // 50 * 1e6
     });
 
-    it("should receive decimal number, not raw string", async () => {
+    it("should receive a decimal string, not the raw money input", async () => {
       const server = new ExactSvmScheme();
-      let receivedAmount: number | null = null;
+      let receivedAmount: string | number | null = null;
       let receivedNetwork: string | null = null;
 
       server.registerMoneyParser(async (amount, network) => {
@@ -45,14 +47,14 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       });
 
       await server.parsePrice("$1.50", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(receivedAmount).toBe(1.5);
+      expect(receivedAmount).toBe("1.50");
       expect(receivedNetwork).toBe("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 
       await server.parsePrice("5.25", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(receivedAmount).toBe(5.25);
+      expect(receivedAmount).toBe("5.25");
 
       await server.parsePrice(10.99, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(receivedAmount).toBe(10.99);
+      expect(receivedAmount).toBe("10.99");
     });
 
     it("should not call parser for AssetAmount (pass-through)", async () => {
@@ -87,7 +89,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
         await new Promise(resolve => setTimeout(resolve, 5));
 
         return {
-          amount: (amount * 1e6).toString(),
+          amount: convertToTokenAmount(String(amount), 6),
           asset: "AsyncTokenMint111111111111111111111",
           extra: { async: true },
         };
@@ -109,7 +111,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       const result = await server.parsePrice(1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 
       // Should use default Solana mainnet USDC
-      expect(result.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+      expect(result.asset).toBe(USDC_MAINNET_ADDRESS);
       expect(result.amount).toBe("1000000");
     });
 
@@ -123,7 +125,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       const result = await server.parsePrice(4.02, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 
       // Should use default Solana mainnet USDC
-      expect(result.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+      expect(result.asset).toBe(USDC_MAINNET_ADDRESS);
       expect(result.amount).toBe("4020000");
     });
   });
@@ -136,12 +138,12 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       server
         .registerMoneyParser(async amount => {
           executionOrder.push(1);
-          if (amount > 1000) return { amount: "1", asset: "Parser1Token", extra: {} };
+          if (Number(amount) > 1000) return { amount: "1", asset: "Parser1Token", extra: {} };
           return null;
         })
         .registerMoneyParser(async amount => {
           executionOrder.push(2);
-          if (amount > 100) return { amount: "2", asset: "Parser2Token", extra: {} };
+          if (Number(amount) > 100) return { amount: "2", asset: "Parser2Token", extra: {} };
           return null;
         })
         .registerMoneyParser(async _amount => {
@@ -189,7 +191,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       const result = await server.parsePrice(1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 
       // Should use default Solana mainnet USDC
-      expect(result.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+      expect(result.asset).toBe(USDC_MAINNET_ADDRESS);
       expect(result.amount).toBe("1000000");
     });
   });
@@ -234,7 +236,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
         if (_network.includes("EtWTRA")) {
           // Devnet
           return {
-            amount: (amount * 1e6).toString(),
+            amount: convertToTokenAmount(String(amount), 6),
             asset: "TestTokenMint1111111111111111111111",
             extra: { network: "devnet", token: "TEST" },
           };
@@ -247,7 +249,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       expect(devnetResult.asset).toBe("TestTokenMint1111111111111111111111");
 
       const mainnetResult = await server.parsePrice(10, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(mainnetResult.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // Default
+      expect(mainnetResult.asset).toBe(USDC_MAINNET_ADDRESS);
     });
 
     it("should support tiered pricing", async () => {
@@ -255,9 +257,9 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
 
       server
         .registerMoneyParser(async amount => {
-          if (amount > 1000) {
+          if (Number(amount) > 1000) {
             return {
-              amount: (amount * 1e9).toString(), // Different decimals
+              amount: convertToTokenAmount(String(amount), 9), // Different decimals
               asset: "PremiumTokenMint11111111111111111",
               extra: { tier: "premium" },
             };
@@ -265,9 +267,9 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
           return null;
         })
         .registerMoneyParser(async amount => {
-          if (amount > 100) {
+          if (Number(amount) > 100) {
             return {
-              amount: (amount * 1e6).toString(),
+              amount: convertToTokenAmount(String(amount), 6),
               asset: "StandardTokenMint1111111111111111",
               extra: { tier: "standard" },
             };
@@ -283,7 +285,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       expect(standard.extra?.tier).toBe("standard");
 
       const basic = await server.parsePrice(50, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(basic.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // Default USDC
+      expect(basic.asset).toBe(USDC_MAINNET_ADDRESS);
     });
 
     it("should support dynamic exchange rates with metadata", async () => {
@@ -292,7 +294,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       const mockRate = 0.98; // 1 USD = 0.98 USDC (fee included)
 
       server.registerMoneyParser(async (amount, _network) => {
-        const usdcAmount = amount * mockRate;
+        const usdcAmount = Number(amount) * mockRate;
         const timestamp = Date.now();
 
         return {
@@ -303,7 +305,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
             originalUSD: amount,
             convertedUSDC: usdcAmount,
             timestamp,
-            fee: amount - usdcAmount,
+            fee: Number(amount) - usdcAmount,
           },
         };
       });
@@ -313,7 +315,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       // 100 USD * 0.98 = 98 USDC
       expect(result.amount).toBe("98000000");
       expect(result.extra?.exchangeRate).toBe(0.98);
-      expect(result.extra?.originalUSD).toBe(100);
+      expect(result.extra?.originalUSD).toBe("100");
       expect(result.extra?.convertedUSDC).toBe(98);
       expect(result.extra?.fee).toBe(2);
     });
@@ -327,12 +329,12 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       server
         .registerMoneyParser(async amount => {
           executionOrder.push(1);
-          if (amount > 1000) return { amount: "1", asset: "Token1", extra: {} };
+          if (Number(amount) > 1000) return { amount: "1", asset: "Token1", extra: {} };
           return null;
         })
         .registerMoneyParser(async amount => {
           executionOrder.push(2);
-          if (amount > 100) return { amount: "2", asset: "Token2", extra: {} };
+          if (Number(amount) > 100) return { amount: "2", asset: "Token2", extra: {} };
           return null;
         })
         .registerMoneyParser(async _amount => {
@@ -380,7 +382,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       const result = await server.parsePrice(1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 
       // Should use default Solana mainnet USDC
-      expect(result.asset).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+      expect(result.asset).toBe(USDC_MAINNET_ADDRESS);
       expect(result.amount).toBe("1000000");
     });
 
@@ -392,7 +394,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
           // Devnet-specific logic
           if (network.includes("EtWTRA")) {
             return {
-              amount: (amount * 1e6).toString(),
+              amount: convertToTokenAmount(String(amount), 6),
               asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
               extra: { network: "devnet" },
             };
@@ -403,7 +405,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
           // Mainnet-specific logic
           if (network.includes("5eykt")) {
             return {
-              amount: (amount * 1e6).toString(),
+              amount: convertToTokenAmount(String(amount), 6),
               asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
               extra: { network: "mainnet" },
             };
@@ -472,7 +474,7 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
   describe("Edge cases", () => {
     it("should handle zero amounts", async () => {
       const server = new ExactSvmScheme();
-      let receivedAmount: number | null = null;
+      let receivedAmount: string | number | null = null;
 
       server.registerMoneyParser(async amount => {
         receivedAmount = amount;
@@ -480,12 +482,12 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       });
 
       await server.parsePrice(0, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(receivedAmount).toBe(0);
+      expect(receivedAmount).toBe("0");
     });
 
     it("should handle very small decimal amounts", async () => {
       const server = new ExactSvmScheme();
-      let receivedAmount: number | null = null;
+      let receivedAmount: string | number | null = null;
 
       server.registerMoneyParser(async amount => {
         receivedAmount = amount;
@@ -493,12 +495,12 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       });
 
       await server.parsePrice(0.000001, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(receivedAmount).toBe(0.000001);
+      expect(receivedAmount).toBe("0.000001");
     });
 
     it("should handle very large amounts", async () => {
       const server = new ExactSvmScheme();
-      let receivedAmount: number | null = null;
+      let receivedAmount: string | number | null = null;
 
       server.registerMoneyParser(async amount => {
         receivedAmount = amount;
@@ -506,41 +508,38 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       });
 
       await server.parsePrice(999999999.99, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
-      expect(receivedAmount).toBe(999999999.99);
+      expect(receivedAmount).toBe("999999999.99");
     });
 
-    it("should throw when price is too small to represent in USDC precision", async () => {
+    it("truncates a price smaller than one atomic unit to 0", async () => {
       const server = new ExactSvmScheme();
-      // USDC has 6 decimals: $0.00000001 = 1e-8 * 1e6 = 0.01 → rounds to 0 → must throw
       await expect(
         server.parsePrice("$0.00000001", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
-      ).rejects.toThrow("too small");
-      // Also throws when passed as a number
+      ).resolves.toMatchObject({ amount: "0" });
       await expect(
         server.parsePrice(0.00000001, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
-      ).rejects.toThrow("too small");
+      ).resolves.toMatchObject({ amount: "0" });
     });
 
-    it("should handle negative amounts (parser can validate)", async () => {
+    it("should reject negative amounts before custom parsers run", async () => {
       const server = new ExactSvmScheme();
-
-      server.registerMoneyParser(async amount => {
-        if (amount < 0) {
-          throw new Error("Negative amounts not supported");
-        }
+      let parserCalled = false;
+      server.registerMoneyParser(async () => {
+        parserCalled = true;
         return null;
       });
 
       await expect(
-        async () => await server.parsePrice(-10, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
-      ).rejects.toThrow("Negative amounts not supported");
+        server.parsePrice(-10, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
+      ).rejects.toThrow("Invalid money format: -10");
+      expect(parserCalled).toBe(false);
     });
   });
 
   describe("Integration with parsePrice flow", () => {
     it("should work with all Money input formats", async () => {
       const server = new ExactSvmScheme();
-      const callLog: Array<{ amount: number; input: any }> = [];
+      const callLog: Array<{ amount: string | number; input: any }> = [];
 
       server.registerMoneyParser(async amount => {
         callLog.push({ amount, input: amount });
@@ -552,9 +551,9 @@ describe("ExactSvmScheme - registerMoneyParser", () => {
       await server.parsePrice(42.25, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 
       expect(callLog).toHaveLength(3);
-      expect(callLog[0].amount).toBe(10.5);
-      expect(callLog[1].amount).toBe(25.75);
-      expect(callLog[2].amount).toBe(42.25);
+      expect(callLog[0].amount).toBe("10.50");
+      expect(callLog[1].amount).toBe("25.75");
+      expect(callLog[2].amount).toBe("42.25");
     });
   });
 });

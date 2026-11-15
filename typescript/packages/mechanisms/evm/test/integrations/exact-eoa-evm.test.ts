@@ -16,13 +16,18 @@ import {
   SettleResponse,
   SupportedResponse,
 } from "@x402/core/types";
-import { ExactEvmScheme as ExactEvmClient, toFacilitatorEvmSigner } from "../../src";
+import {
+  DEFAULT_ASSETS,
+  ExactEvmScheme as ExactEvmClient,
+  toFacilitatorEvmSigner,
+} from "../../src";
 import { ExactEvmScheme as ExactEvmServer } from "../../src/exact/server/scheme";
 import { ExactEvmScheme as ExactEvmFacilitator } from "../../src/exact/facilitator/scheme";
 import type { ExactEvmPayloadV2 } from "../../src/types";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient, createPublicClient, http } from "viem";
 import { baseSepolia } from "viem/chains";
+import { convertToTokenAmount } from "@x402/core/utils";
 
 // Load private keys from environment
 const CLIENT_PRIVATE_KEY = process.env.CLIENT_PRIVATE_KEY as `0x${string}`;
@@ -452,7 +457,7 @@ describe("EVM Integration Tests", () => {
 
         expect(requirements).toHaveLength(1);
         expect(requirements[0].amount).toBe(testCase.expectedAmount);
-        expect(requirements[0].asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e"); // Base Sepolia USDC
+        expect(requirements[0].asset).toBe(DEFAULT_ASSETS["eip155:84532"]![0]!.asset);
       }
     });
 
@@ -479,9 +484,9 @@ describe("EVM Integration Tests", () => {
     it("should use registerMoneyParser for custom conversion", async () => {
       // register custom parser: large amounts use DAI
       evmServer.registerMoneyParser(async (amount, _network) => {
-        if (amount > 100) {
+        if (Number(amount) > 100) {
           return {
-            amount: (amount * 1e18).toString(), // DAI has 18 decimals
+            amount: convertToTokenAmount(String(amount), 18), // DAI has 18 decimals
             asset: "0x6B175474E89094C44Da98b954EedeAC495271d0F", // DAI on mainnet (test value)
             extra: { token: "DAI", tier: "large" },
           };
@@ -511,15 +516,15 @@ describe("EVM Integration Tests", () => {
       });
 
       expect(smallRequirements[0].amount).toBe("50000000"); // 50 * 1e6 (USDC)
-      expect(smallRequirements[0].asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e"); // Base Sepolia USDC
+      expect(smallRequirements[0].asset).toBe(DEFAULT_ASSETS["eip155:84532"]![0]!.asset);
     });
 
     it("should support multiple MoneyParser in chain", async () => {
       evmServer
         .registerMoneyParser(async amount => {
-          if (amount > 1000) {
+          if (Number(amount) > 1000) {
             return {
-              amount: (amount * 1e18).toString(),
+              amount: convertToTokenAmount(String(amount), 18),
               asset: "0xDAI",
               extra: { tier: "vip" },
             };
@@ -527,9 +532,9 @@ describe("EVM Integration Tests", () => {
           return null;
         })
         .registerMoneyParser(async amount => {
-          if (amount > 100) {
+          if (Number(amount) > 100) {
             return {
-              amount: (amount * 1e6).toString(),
+              amount: convertToTokenAmount(String(amount), 6),
               asset: "0xUSDT",
               extra: { tier: "premium" },
             };
@@ -565,7 +570,7 @@ describe("EVM Integration Tests", () => {
         price: 50,
         network: "eip155:84532" as Network,
       });
-      expect(standardReq[0].asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e"); // Default USDC
+      expect(standardReq[0].asset).toBe(DEFAULT_ASSETS["eip155:84532"]![0]!.asset);
     });
 
     it("should work with async MoneyParser (e.g., exchange rate lookup)", async () => {
@@ -575,7 +580,7 @@ describe("EVM Integration Tests", () => {
         // Simulate async API call
         await new Promise(resolve => setTimeout(resolve, 10));
 
-        const usdcAmount = amount * mockExchangeRate;
+        const usdcAmount = Number(amount) * mockExchangeRate;
         return {
           amount: Math.floor(usdcAmount * 1e6).toString(),
           asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
@@ -596,7 +601,7 @@ describe("EVM Integration Tests", () => {
       // 100 USD * 1.02 = 102 USDC
       expect(requirements[0].amount).toBe("102000000");
       expect(requirements[0].extra?.exchangeRate).toBe(1.02);
-      expect(requirements[0].extra?.originalUSD).toBe(100);
+      expect(requirements[0].extra?.originalUSD).toBe("100");
     });
 
     it("should avoid floating-point rounding error", async () => {
@@ -616,7 +621,7 @@ describe("EVM Integration Tests", () => {
 
         expect(requirements).toHaveLength(1);
         expect(requirements[0].amount).toBe(testCase.expectedAmount);
-        expect(requirements[0].asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e"); // Base Sepolia USDC
+        expect(requirements[0].asset).toBe(DEFAULT_ASSETS["eip155:84532"]![0]!.asset);
       }
     });
   });

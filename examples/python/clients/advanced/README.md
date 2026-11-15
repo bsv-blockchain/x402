@@ -1,6 +1,6 @@
 # Advanced Python Client Examples
 
-This directory contains advanced x402 client examples demonstrating hooks, custom selectors, and builder patterns across EVM, SVM, and TVM networks.
+This directory contains advanced x402 client examples demonstrating hooks, custom selectors, builder patterns, and spend controls across EVM, SVM, and TVM networks.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ To fund your TVM payer wallet, request testnet TON from [@testgiver_ton_bot](htt
 
    ```bash
    cd examples/python/clients/advanced
-   uv sync
+   uv sync --reinstall-package x402
    ```
 
 2. **Configure environment:**
@@ -34,7 +34,7 @@ To fund your TVM payer wallet, request testnet TON from [@testgiver_ton_bot](htt
 
    ```bash
    cd examples/python/servers/fastapi
-   uv sync && uv run uvicorn main:app --port 4021
+   uv sync --reinstall-package x402 && uv run uvicorn main:app --port 4021
    ```
 
 ## Running Examples
@@ -47,6 +47,7 @@ uv run python all_networks.py
 uv run python index.py hooks
 uv run python index.py preferred_network
 uv run python index.py builder_pattern
+uv run python index.py spend_controls
 
 # Run all examples
 uv run python index.py all
@@ -62,6 +63,7 @@ uv run python all_networks.py
 uv run python hooks.py
 uv run python preferred_network.py
 uv run python builder_pattern.py
+uv run python spend_controls.py
 ```
 
 ## Examples Overview
@@ -110,6 +112,41 @@ Demonstrates network-specific scheme registration:
 - Multi-network wallet support
 - Network-specific signer configurations
 
+### 4. Spend Controls (`spend_controls.py`)
+
+By default the client caps recognized pegged assets at `$1` and rejects everything else. Use `spend_controls` to raise the cap or opt into non-default tokens.
+
+```python
+client = x402Client.from_config(
+    x402ClientConfig(
+        schemes=[SchemeRegistration(network="eip155:*", client=ExactEvmScheme(signer))],
+        spend_controls={
+            "max_amount_per_payment": "$1",  # default USD cap on recognized pegged assets
+            "allowed_assets": [
+                # opt-in non-default with atomic cap
+                {"network": "eip155:*", "asset": "0xCustomToken", "max_amount_per_payment": "2000000"},
+                # opt-in non-default uncapped
+                {"network": "eip155:*", "asset": "0xOtherToken"},
+                # override USD cap for a default asset by ticker (or on-chain id)
+                {"network": "eip155:*", "asset": "USDC", "max_amount_per_payment": "1000000"},
+            ],
+        },
+    )
+)
+```
+
+| Control | Purpose |
+| --- | --- |
+| `max_amount_per_payment` | USD ceiling on recognized pegged assets (default `$1`). Set `False` to remove. |
+| `allowed_assets` | Opt-in for non-default tokens. List of `{ network, asset }` with optional atomic `max_amount_per_payment`, or `True` to allow any asset. |
+| `spend_controls: False` | Disable all spend controls. Use only for UI-confirmed flows (paywall). |
+
+**Use cases:**
+
+- Bound spend against a malicious 402 or unbounded custom token
+- Allow a specific custom token without disabling the USD cap on stables
+- Override the cap for one ticker (e.g. PYUSD) without raising it globally
+
 ## Project Structure
 
 ```
@@ -121,7 +158,8 @@ advanced/
 ├── index.py                # CLI entry point
 ├── hooks.py                # Lifecycle hooks example
 ├── preferred_network.py    # Custom selector example
-└── builder_pattern.py      # Network registration example
+├── builder_pattern.py      # Network registration example
+└── spend_controls.py       # Spend controls example
 ```
 
 ## Best Practices
@@ -129,3 +167,17 @@ advanced/
 1. **Use hooks for observability** - Log payment events for debugging and metrics
 2. **Configure network preferences** - Users may prefer specific networks
 3. **Separate keys per environment** - Don't use production keys for testing
+
+### Cardano
+
+`all_networks.py` also supports Cardano Preprod. Install the example dependencies
+with `uv sync`, then set `CARDANO_NETWORK=cardano:preprod`. Clients use
+`CARDANO_MNEMONIC` and `BLOCKFROST_PROJECT_ID`; servers use `CARDANO_ADDRESS`;
+facilitators need only `BLOCKFROST_PROJECT_ID`. Set `FACILITATOR_URL` to your
+Cardano-enabled facilitator. The default USD price uses Preprod USDM, so the
+buyer needs that token and ADA for fees and minimum UTxO deposits.
+
+`CARDANO_RPC_URL` overrides the Preprod Blockfrost URL. When selecting another
+network, supply its matching provider URL and project ID. See the
+[Cardano mechanism guide](../../../../python/x402/mechanisms/cardano/README.md)
+for explicit ADA prices, script payments, Masumi quotes and confirmation policy.

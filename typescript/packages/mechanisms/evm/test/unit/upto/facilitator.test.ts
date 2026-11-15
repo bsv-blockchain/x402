@@ -8,13 +8,21 @@ import {
   ErrPermit2AmountMismatch,
   ErrUptoAmountExceedsPermitted,
   ErrUptoFacilitatorMismatch,
+  ErrUptoInvalidPayload,
+  ErrUptoInvalidRequiredAmount,
   ErrUptoSettlementExceedsAmount,
   ErrUptoUnauthorizedFacilitator,
   ErrUptoInvalidScheme,
   ErrUptoNetworkMismatch,
+  ErrUptoTransactionFailed,
 } from "../../../src/upto/facilitator/errors";
+import {
+  ErrErc20ApprovalBroadcastFailed,
+  ErrSettlementPending,
+} from "../../../src/exact/facilitator/errors";
 import type { UptoPermit2Payload } from "../../../src/types";
 import { ERC20_APPROVAL_GAS_SPONSORING_KEY } from "../../../src/upto/extensions";
+import { resetAssetContractCache } from "../../../src/assetCache";
 
 vi.mock("viem", async importOriginal => {
   const actual = await importOriginal<typeof import("viem")>();
@@ -26,6 +34,9 @@ vi.mock("viem", async importOriginal => {
 });
 
 const FACILITATOR_ADDRESS = "0xFAC11174700123456789012345678901234aBCDe" as `0x${string}`;
+
+// Settle validates the broadcast hash before waiting on it, so mocks must return a well-formed one.
+const MOCK_TX_HASH = ("0x" + "12".repeat(32)) as `0x${string}`;
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -76,6 +87,106 @@ function makeRequirements(overrides?: Partial<PaymentRequirements>): PaymentRequ
   };
 }
 
+const MISSING = Symbol("missing");
+const UNSUPPORTED_PAYLOAD_MESSAGE = "unsupported payload type: expected upto permit2 payload";
+
+// [name, path, value, messagePrefix]: set the field at `path` in the payload; MISSING deletes it.
+// Cases the upto payload guard rejects outright (a missing or wrong-typed field) surface with the
+// unsupported-type message; cases inside an upto-shaped payload are rejected by the shape
+// validator with a message naming the field. Both must return ErrUptoInvalidPayload from verify
+// and settle instead of throwing.
+const MALFORMED_UPTO_PAYLOADS: Array<[string, string[], unknown, string]> = [
+  ["authorization not object", ["permit2Authorization"], "oops", "unsupported payload type"],
+  ["witness not object", ["permit2Authorization", "witness"], [], "unsupported payload type"],
+  [
+    "facilitator missing",
+    ["permit2Authorization", "witness", "facilitator"],
+    MISSING,
+    "unsupported payload type",
+  ],
+  ["permitted not object", ["permit2Authorization", "permitted"], null, "unsupported payload type"],
+  ["from not string", ["permit2Authorization", "from"], 123, "unsupported payload type"],
+  ["spender missing", ["permit2Authorization", "spender"], MISSING, "unsupported payload type"],
+  [
+    "token not string",
+    ["permit2Authorization", "permitted", "token"],
+    null,
+    "unsupported payload type",
+  ],
+  [
+    "witness.to not string",
+    ["permit2Authorization", "witness", "to"],
+    123,
+    "unsupported payload type",
+  ],
+  [
+    "facilitator not string",
+    ["permit2Authorization", "witness", "facilitator"],
+    123,
+    "unsupported payload type",
+  ],
+  [
+    "nonce not numeric",
+    ["permit2Authorization", "nonce"],
+    "abc",
+    "permit2Authorization.nonce must be ",
+  ],
+  ["nonce json number", ["permit2Authorization", "nonce"], 123, "unsupported payload type"],
+  [
+    "nonce above uint256",
+    ["permit2Authorization", "nonce"],
+    (1n << 256n).toString(),
+    "permit2Authorization.nonce must be ",
+  ],
+  ["deadline missing", ["permit2Authorization", "deadline"], MISSING, "unsupported payload type"],
+  [
+    "deadline over digit limit",
+    ["permit2Authorization", "deadline"],
+    "1".repeat(5000),
+    "permit2Authorization.deadline must be ",
+  ],
+  [
+    "amount negative",
+    ["permit2Authorization", "permitted", "amount"],
+    "-1",
+    "permit2Authorization.permitted.amount must be ",
+  ],
+  [
+    "amount json number",
+    ["permit2Authorization", "permitted", "amount"],
+    1000,
+    "unsupported payload type",
+  ],
+  [
+    "validAfter list",
+    ["permit2Authorization", "witness", "validAfter"],
+    [],
+    "unsupported payload type",
+  ],
+  ["signature not string", ["signature"], 123, "unsupported payload type"],
+  [
+    "facilitator not address",
+    ["permit2Authorization", "witness", "facilitator"],
+    "0xnotanaddress",
+    "permit2Authorization.witness.facilitator must be ",
+  ],
+];
+
+function makeMalformedUptoPayload(path: string[], value: unknown): PaymentPayload {
+  const payload = makePayload();
+  const raw = structuredClone(payload.payload) as Record<string, unknown>;
+  const target = path
+    .slice(0, -1)
+    .reduce<Record<string, unknown>>((node, key) => node[key] as Record<string, unknown>, raw);
+  const field = path[path.length - 1];
+  if (value === MISSING) {
+    delete target[field];
+  } else {
+    target[field] = value;
+  }
+  return { ...payload, payload: raw };
+}
+
 // Returns deployed-contract bytecode for the token/asset address, EOA ("0x") for everything else.
 // Used in payer-is-EOA tests where the token contract must still appear deployed.
 const mockGetCodeEOAPayer =
@@ -111,11 +222,13 @@ describe("UptoEvmScheme (Facilitator)", () => {
   let scheme: UptoEvmScheme;
 
   beforeEach(() => {
+    resetAssetContractCache();
+
     mockSigner = {
       getAddresses: () => [FACILITATOR_ADDRESS],
       readContract: rcWithSig(BigInt("999999999999999999")),
       verifyTypedData: vi.fn().mockResolvedValue(true),
-      writeContract: vi.fn().mockResolvedValue("0xtxhash1234" as `0x${string}`),
+      writeContract: vi.fn().mockResolvedValue(MOCK_TX_HASH),
       sendTransaction: vi.fn(),
       waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: "success" }),
       // Default: asset is a deployed contract. Tests that need an EOA payer
@@ -275,7 +388,7 @@ describe("UptoEvmScheme (Facilitator)", () => {
       expect(result.invalidReason).toBe("invalid_permit2_signature");
     });
 
-    it("should reject non-Permit2 payload via scheme wrapper with unsupported_payload_type", async () => {
+    it("should reject non-Permit2 payload via scheme wrapper with invalid_upto_evm_payload", async () => {
       const payload: PaymentPayload = {
         x402Version: 2,
         accepted: { scheme: "upto", network: "eip155:8453" },
@@ -295,7 +408,43 @@ describe("UptoEvmScheme (Facilitator)", () => {
       const result = await scheme.verify(payload, makeRequirements());
 
       expect(result.isValid).toBe(false);
-      expect(result.invalidReason).toBe("unsupported_payload_type");
+      expect(result.invalidReason).toBe(ErrUptoInvalidPayload);
+      expect(result.invalidMessage).toBe(UNSUPPORTED_PAYLOAD_MESSAGE);
+    });
+
+    it.each(MALFORMED_UPTO_PAYLOADS)(
+      "should reject malformed payload with invalid_upto_evm_payload: %s",
+      async (_name, path, value, messagePrefix) => {
+        const result = await scheme.verify(
+          makeMalformedUptoPayload(path, value),
+          makeRequirements(),
+        );
+
+        expect(result.isValid).toBe(false);
+        expect(result.invalidReason).toBe(ErrUptoInvalidPayload);
+        expect(result.invalidMessage).toMatch(new RegExp(`^${messagePrefix}`));
+      },
+    );
+
+    it("should report the payer for a malformed payload with a readable from", async () => {
+      const payload = makeMalformedUptoPayload(["permit2Authorization", "nonce"], "abc");
+
+      const result = await scheme.verify(payload, makeRequirements());
+
+      expect(result.invalidReason).toBe(ErrUptoInvalidPayload);
+      expect(result.payer).toBe("0x1234567890123456789012345678901234567890");
+    });
+
+    it("should reject an unparsable requirements.amount with invalid_upto_evm_required_amount", async () => {
+      const result = await scheme.verify(
+        makePayload(),
+        makeRequirements({ amount: "not-a-number" }),
+      );
+
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe(ErrUptoInvalidRequiredAmount);
+      expect(result.invalidMessage).toBe("invalid required amount format");
+      expect(result.payer).toBe("0x1234567890123456789012345678901234567890");
     });
   });
 
@@ -304,7 +453,7 @@ describe("UptoEvmScheme (Facilitator)", () => {
       const result = await scheme.settle(makePayload(), makeRequirements());
 
       expect(result.success).toBe(true);
-      expect(result.transaction).toBe("0xtxhash1234");
+      expect(result.transaction).toBe(MOCK_TX_HASH);
       expect(result.payer).toBe("0x1234567890123456789012345678901234567890");
       expect(mockSigner.writeContract).toHaveBeenCalled();
     });
@@ -340,7 +489,7 @@ describe("UptoEvmScheme (Facilitator)", () => {
       const result = await scheme.settle(makePayload(), makeRequirements({ amount: "500000" }));
 
       expect(result.success).toBe(true);
-      expect(result.transaction).toBe("0xtxhash1234");
+      expect(result.transaction).toBe(MOCK_TX_HASH);
       expect(mockSigner.writeContract).toHaveBeenCalled();
 
       const writeCall = (mockSigner.writeContract as ReturnType<typeof vi.fn>).mock.calls[0][0];
@@ -360,7 +509,7 @@ describe("UptoEvmScheme (Facilitator)", () => {
       expect(result.errorReason).toBe(ErrUptoSettlementExceedsAmount);
     });
 
-    it("should reject non-Permit2 payload via scheme wrapper with unsupported_payload_type", async () => {
+    it("should reject non-Permit2 payload via scheme wrapper with invalid_upto_evm_payload", async () => {
       const payload: PaymentPayload = {
         x402Version: 2,
         accepted: { scheme: "upto", network: "eip155:8453" },
@@ -380,7 +529,45 @@ describe("UptoEvmScheme (Facilitator)", () => {
       const result = await scheme.settle(payload, makeRequirements());
 
       expect(result.success).toBe(false);
-      expect(result.errorReason).toBe("unsupported_payload_type");
+      expect(result.errorReason).toBe(ErrUptoInvalidPayload);
+      expect(result.errorMessage).toBe(UNSUPPORTED_PAYLOAD_MESSAGE);
+    });
+
+    it.each(MALFORMED_UPTO_PAYLOADS)(
+      "should reject malformed payload with invalid_upto_evm_payload: %s",
+      async (_name, path, value, messagePrefix) => {
+        const result = await scheme.settle(
+          makeMalformedUptoPayload(path, value),
+          makeRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe(ErrUptoInvalidPayload);
+        expect(result.errorMessage).toMatch(new RegExp(`^${messagePrefix}`));
+        expect(result.network).toBe("eip155:8453");
+        expect(mockSigner.writeContract).not.toHaveBeenCalled();
+      },
+    );
+
+    it("should report the payer for a malformed payload with a readable from", async () => {
+      const payload = makeMalformedUptoPayload(["permit2Authorization", "nonce"], "abc");
+
+      const result = await scheme.settle(payload, makeRequirements());
+
+      expect(result.errorReason).toBe(ErrUptoInvalidPayload);
+      expect(result.payer).toBe("0x1234567890123456789012345678901234567890");
+    });
+
+    it("should reject an unparsable settlement amount with invalid_upto_evm_payload", async () => {
+      const result = await scheme.settle(
+        makePayload(),
+        makeRequirements({ amount: "not-a-number" }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(ErrUptoInvalidPayload);
+      expect(result.errorMessage).toBe("invalid settlement amount");
+      expect(mockSigner.writeContract).not.toHaveBeenCalled();
     });
   });
 
@@ -443,7 +630,7 @@ describe("UptoEvmScheme (Facilitator)", () => {
         vi.clearAllMocks();
         mockSigner.readContract = rcWithSig(BigInt("999999999999999999"));
         mockSigner.verifyTypedData = vi.fn().mockResolvedValue(true);
-        mockSigner.writeContract = vi.fn().mockResolvedValue("0xtxhash1234" as `0x${string}`);
+        mockSigner.writeContract = vi.fn().mockResolvedValue(MOCK_TX_HASH);
         mockSigner.waitForTransactionReceipt = vi.fn().mockResolvedValue({ status: "success" });
 
         const p2 = makePermit2Payload();
@@ -631,6 +818,44 @@ describe("UptoEvmScheme (Facilitator)", () => {
 
       expect(result.success).toBe(false);
     });
+
+    it("should report settlement_pending with the broadcast tx hash when the receipt wait fails", async () => {
+      mockSigner.waitForTransactionReceipt = vi
+        .fn()
+        .mockRejectedValue(new Error("rpc: timeout waiting for receipt"));
+
+      const result = await scheme.settle(makePayload(), makeRequirements());
+
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(ErrSettlementPending);
+      expect(result.transaction).toBe(MOCK_TX_HASH);
+      // Nothing is known to have settled yet, so no amount is reported.
+      expect(result.amount).toBeUndefined();
+    });
+
+    it("should fail terminally when the signer reports success without a usable tx hash", async () => {
+      mockSigner.writeContract = vi.fn().mockResolvedValue("0xnothash");
+      mockSigner.waitForTransactionReceipt = vi.fn();
+
+      const result = await scheme.settle(makePayload(), makeRequirements());
+
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(ErrUptoTransactionFailed);
+      expect(result.transaction).toBe("");
+      expect(mockSigner.waitForTransactionReceipt).not.toHaveBeenCalled();
+    });
+
+    it("should report settlement_pending when the receipt wait throws a programmer error", async () => {
+      mockSigner.waitForTransactionReceipt = vi
+        .fn()
+        .mockRejectedValue(new TypeError("Cannot read properties of undefined (reading 'status')"));
+
+      const result = await scheme.settle(makePayload(), makeRequirements());
+
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(ErrSettlementPending);
+      expect(result.transaction).toBe(MOCK_TX_HASH);
+    });
   });
 
   describe("EIP-2612 Gas Sponsoring - Settlement", () => {
@@ -674,7 +899,7 @@ describe("UptoEvmScheme (Facilitator)", () => {
       const result = await scheme.settle(payload, eip2612Requirements);
 
       expect(result.success).toBe(true);
-      expect(result.transaction).toBe("0xtxhash1234");
+      expect(result.transaction).toBe(MOCK_TX_HASH);
 
       const writeCall = (mockSigner.writeContract as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(writeCall.functionName).toBe("settleWithPermit");
@@ -947,8 +1172,9 @@ describe("UptoEvmScheme (Facilitator)", () => {
     }
 
     function makeErc20SettleContext() {
-      const SETTLE_TX_HASH = "0xsettle_tx_hash_mock" as `0x${string}`;
-      const mockSendTransactions = vi.fn().mockResolvedValue([SETTLE_TX_HASH]);
+      const APPROVAL_TX_HASH = ("0x" + "11".repeat(32)) as `0x${string}`;
+      const SETTLE_TX_HASH = ("0x" + "22".repeat(32)) as `0x${string}`;
+      const mockSendTransactions = vi.fn().mockResolvedValue([APPROVAL_TX_HASH, SETTLE_TX_HASH]);
       const mockExtWaitForReceipt = vi.fn().mockResolvedValue({ status: "success" });
 
       const mockContext = {
@@ -1002,6 +1228,146 @@ describe("UptoEvmScheme (Facilitator)", () => {
       expect(mockSigner.writeContract).not.toHaveBeenCalled();
 
       expect(result.success).toBe(true);
+    });
+
+    it("should fail when the extension signer returns an invalid settlement transaction hash", async () => {
+      const { parseTransaction, recoverTransactionAddress } = await import("viem");
+      vi.mocked(parseTransaction).mockReturnValue({
+        to: TOKEN_ADDRESS,
+        data: APPROVE_CALLDATA as `0x${string}`,
+      } as any);
+      vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
+
+      mockSigner.readContract = rcWithSig(undefined);
+
+      const mockExtWaitForReceipt = vi.fn();
+      const mockSendTransactions = vi.fn().mockResolvedValue(["0xapproval"]);
+      const mockContext = {
+        getExtension: vi.fn().mockImplementation((key: string) => {
+          if (key === ERC20_APPROVAL_GAS_SPONSORING_KEY) {
+            return {
+              key: ERC20_APPROVAL_GAS_SPONSORING_KEY,
+              signer: {
+                getAddresses: () => [FACILITATOR_ADDRESS],
+                readContract: mockSigner.readContract,
+                verifyTypedData: mockSigner.verifyTypedData,
+                writeContract: vi.fn(),
+                sendTransaction: vi.fn(),
+                waitForTransactionReceipt: mockExtWaitForReceipt,
+                getCode: vi.fn().mockResolvedValue("0x"),
+                sendTransactions: mockSendTransactions,
+              },
+            };
+          }
+          return undefined;
+        }),
+      };
+
+      const result = await scheme.settle(
+        makeErc20UptoPayload(makeValidErc20Extension()),
+        erc20SettleRequirements,
+        mockContext,
+      );
+
+      expect(mockExtWaitForReceipt).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(ErrErc20ApprovalBroadcastFailed);
+      expect(result.transaction).toBe("");
+    });
+
+    it("should succeed when the extension signer bundles approval + settle into a single hash", async () => {
+      // The extension signer owns execution strategy: it may bundle transactions
+      // atomically (e.g. Flashbots, smart account batching) and return a single hash
+      // for the bundle rather than one hash per input.
+      const { parseTransaction, recoverTransactionAddress } = await import("viem");
+      vi.mocked(parseTransaction).mockReturnValue({
+        to: TOKEN_ADDRESS,
+        data: APPROVE_CALLDATA as `0x${string}`,
+      } as any);
+      vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
+
+      mockSigner.readContract = rcWithSig(undefined);
+
+      const BUNDLE_TX_HASH = ("0x" + "ef".repeat(32)) as `0x${string}`;
+      const mockExtWaitForReceipt = vi.fn().mockResolvedValue({ status: "success" });
+      const mockSendTransactions = vi.fn().mockResolvedValue([BUNDLE_TX_HASH]);
+      const mockContext = {
+        getExtension: vi.fn().mockImplementation((key: string) => {
+          if (key === ERC20_APPROVAL_GAS_SPONSORING_KEY) {
+            return {
+              key: ERC20_APPROVAL_GAS_SPONSORING_KEY,
+              signer: {
+                getAddresses: () => [FACILITATOR_ADDRESS],
+                readContract: mockSigner.readContract,
+                verifyTypedData: mockSigner.verifyTypedData,
+                writeContract: vi.fn(),
+                sendTransaction: vi.fn(),
+                waitForTransactionReceipt: mockExtWaitForReceipt,
+                getCode: vi.fn().mockResolvedValue("0x"),
+                sendTransactions: mockSendTransactions,
+              },
+            };
+          }
+          return undefined;
+        }),
+      };
+
+      const result = await scheme.settle(
+        makeErc20UptoPayload(makeValidErc20Extension()),
+        erc20SettleRequirements,
+        mockContext,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.transaction).toBe(BUNDLE_TX_HASH);
+    });
+
+    it("should report settlement_pending when the extension signer's receipt wait fails", async () => {
+      const { parseTransaction, recoverTransactionAddress } = await import("viem");
+      vi.mocked(parseTransaction).mockReturnValue({
+        to: TOKEN_ADDRESS,
+        data: APPROVE_CALLDATA as `0x${string}`,
+      } as any);
+      vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
+
+      mockSigner.readContract = rcWithSig(undefined);
+
+      const APPROVAL_TX_HASH = ("0x" + "11".repeat(32)) as `0x${string}`;
+      const SETTLE_TX_HASH = ("0x" + "ef".repeat(32)) as `0x${string}`;
+      const mockExtWaitForReceipt = vi
+        .fn()
+        .mockRejectedValue(new Error("rpc: timeout waiting for receipt"));
+      const mockSendTransactions = vi.fn().mockResolvedValue([APPROVAL_TX_HASH, SETTLE_TX_HASH]);
+      const mockContext = {
+        getExtension: vi.fn().mockImplementation((key: string) => {
+          if (key === ERC20_APPROVAL_GAS_SPONSORING_KEY) {
+            return {
+              key: ERC20_APPROVAL_GAS_SPONSORING_KEY,
+              signer: {
+                getAddresses: () => [FACILITATOR_ADDRESS],
+                readContract: mockSigner.readContract,
+                verifyTypedData: mockSigner.verifyTypedData,
+                writeContract: vi.fn(),
+                sendTransaction: vi.fn(),
+                waitForTransactionReceipt: mockExtWaitForReceipt,
+                getCode: vi.fn().mockResolvedValue("0x"),
+                sendTransactions: mockSendTransactions,
+              },
+            };
+          }
+          return undefined;
+        }),
+      };
+
+      const result = await scheme.settle(
+        makeErc20UptoPayload(makeValidErc20Extension()),
+        erc20SettleRequirements,
+        mockContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(ErrSettlementPending);
+      expect(result.transaction).toBe(SETTLE_TX_HASH);
     });
 
     it("should include settlement amount in ERC-20 approval settle response", async () => {

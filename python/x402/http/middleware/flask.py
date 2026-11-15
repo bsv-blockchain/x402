@@ -7,6 +7,7 @@ Uses x402HTTPResourceServerSync for synchronous request processing without async
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
@@ -18,17 +19,20 @@ except ImportError as e:
         "Flask middleware requires the flask package. Install with: uv add x402[flask]"
     ) from e
 
-from ...schemas import VerifiedPaymentCancelOptions
+from ...schemas import SettleResponse, VerifiedPaymentCancelOptions
+from ..background_init import handle_background_init_error
 from ..constants import SETTLEMENT_OVERRIDES_HEADER
 from ..facilitator_client_base import FacilitatorResponseError
 from ..types import (
     HTTPAdapter,
     HTTPRequestContext,
+    HTTPResponseInstructions,
     HTTPTransportContext,
     PaywallConfig,
     RoutesConfig,
 )
 from ..x402_http_server import PaywallProvider, x402HTTPResourceServerSync
+from ..x402_http_server_base import PAYMENT_REQUIRED_CACHE_CONTROL, with_private_cache_control
 
 if TYPE_CHECKING:
     from ...server import x402ResourceServerSync
@@ -47,6 +51,17 @@ from ._bazaar_utils import (
 from ._bazaar_utils import (
     validate_bazaar_extensions as _validate_bazaar_extensions,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _route_matching_path(environ: dict[str, Any]) -> str:
+    """Return the escaped request path used for route matching."""
+    raw = environ.get("RAW_URI") or environ.get("REQUEST_URI")
+    if raw:
+        return str(raw).split("?")[0]
+    return str(environ.get("PATH_INFO", "/"))
+
 
 # ============================================================================
 # Flask Adapter
@@ -162,6 +177,29 @@ def _facilitator_error_wsgi_response(
         [("Content-Type", "application/json")],
     )
     return [body]
+
+
+def _internal_error_wsgi_response(
+    start_response: Callable[..., Any],
+    extra_headers: dict[str, str] | None = None,
+) -> list[bytes]:
+    """Return a generic 500 without leaking unexpected exception details."""
+    body = json.dumps({"error": "Internal Server Error"}).encode("utf-8")
+    headers = [("Content-Type", "application/json")]
+    if extra_headers:
+        headers.extend(extra_headers.items())
+    start_response("500 Internal Server Error", headers)
+    return [body]
+
+
+def _declared_plain_text_body(response: HTTPResponseInstructions) -> str | None:
+    content_type = (
+        response.headers.get("Content-Type") or response.headers.get("content-type") or ""
+    )
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type == "text/plain" and isinstance(response.body, str):
+        return response.body
+    return None
 
 
 class ResponseWrapper:
@@ -287,7 +325,7 @@ class PaymentMiddleware:
             server: x402ResourceServerSync instance (must be sync variant).
             paywall_config: Optional paywall configuration.
             paywall_provider: Optional custom paywall provider.
-            sync_facilitator_on_start: Initialize on first protected request.
+            sync_facilitator_on_start: Initialize when the middleware is created.
         """
         # Auto-register bazaar extension if routes declare it
         if _check_if_bazaar_needed(routes):
@@ -304,6 +342,16 @@ class PaymentMiddleware:
 
         if paywall_provider:
             self._http_server.register_paywall_provider(paywall_provider)
+
+        # Initialize if requested - queries facilitator /supported to populate
+        # facilitator clients. Fatal capability / route mismatches exit the process
+        # so a misconfigured server does not stay up until the first paid request.
+        if self._sync_on_start:
+            try:
+                self._http_server.initialize()
+                self._init_done = True
+            except Exception as error:
+                handle_background_init_error(error)
 
         # Replace WSGI app
         app.wsgi_app = self._wsgi_middleware  # type: ignore
@@ -325,9 +373,12 @@ class PaymentMiddleware:
         with self._app.request_context(environ):
             # Create adapter and context
             adapter = FlaskAdapter(request)
+            # Werkzeug dispatches literal routes on decoded PATH_INFO but
+            # wildcard/param routes on the escaped path, so match both.
             context = HTTPRequestContext(
                 adapter=adapter,
-                path=request.path,
+                path=_route_matching_path(environ),
+                decoded_path=str(environ.get("PATH_INFO", "/")),
                 method=request.method,
                 payment_header=(
                     adapter.get_header("payment-signature") or adapter.get_header("x-payment")
@@ -353,6 +404,9 @@ class PaymentMiddleware:
                 result = self._http_server.process_http_request(context, self._paywall_config)
             except FacilitatorResponseError as error:
                 return _facilitator_error_wsgi_response(start_response, error)
+            except Exception:
+                logger.exception("x402: unexpected error while processing an HTTP payment request")
+                return _internal_error_wsgi_response(start_response)
 
             if result.type == "no-payment-required":
                 return self._original_wsgi(environ, start_response)
@@ -369,6 +423,7 @@ class PaymentMiddleware:
 
                 status = f"{response.status} Payment Required"
                 headers = list(response.headers.items())
+                plain_text = _declared_plain_text_body(response)
 
                 if response.is_html:
                     headers.append(("Content-Type", "text/html; charset=utf-8"))
@@ -377,6 +432,8 @@ class PaymentMiddleware:
                         if isinstance(response.body, str)
                         else response.body
                     )
+                elif plain_text is not None:
+                    body = plain_text.encode("utf-8")
                 else:
                     headers.append(("Content-Type", "application/json"))
                     body = json.dumps(response.body or {}).encode("utf-8")
@@ -399,28 +456,58 @@ class PaymentMiddleware:
                     for chunk in self._original_wsgi(environ, response_wrapper):
                         body_chunks.append(chunk)
                 except BaseException as error:
+                    cancel_settlement = None
                     if dispatcher is not None:
-                        dispatcher.cancel_sync(
+                        cancel_settlement = dispatcher.cancel_sync(
                             VerifiedPaymentCancelOptions(reason="handler_threw", error=error)
                         )
-                    raise
+                    failure_headers = self._http_server.create_failure_path_settlement_headers(
+                        cancel_settlement,
+                        result.before_handler_settlement,
+                        result.payment_payload,
+                    )
+                    if not isinstance(failure_headers, dict) or not failure_headers:
+                        raise
+                    return _internal_error_wsgi_response(start_response, failure_headers)
 
                 if response_wrapper.status_code is not None and response_wrapper.status_code >= 400:
+                    # Overrides only apply when a settlement runs; never send the
+                    # internal header to the client.
+                    response_wrapper.headers = [
+                        (k, v)
+                        for k, v in response_wrapper.headers
+                        if k.lower() != SETTLEMENT_OVERRIDES_HEADER.lower()
+                    ]
+                    cancel_settlement = None
                     if dispatcher is not None:
-                        dispatcher.cancel_sync(
+                        cancel_settlement = dispatcher.cancel_sync(
                             VerifiedPaymentCancelOptions(
                                 reason="handler_failed",
                                 response_status=response_wrapper.status_code,
                             )
                         )
+                    existing_cache_control = next(
+                        (
+                            value
+                            for key, value in response_wrapper.headers
+                            if key.lower() == "cache-control"
+                        ),
+                        None,
+                    )
+                    failure_headers = self._http_server.create_failure_path_settlement_headers(
+                        cancel_settlement,
+                        result.before_handler_settlement,
+                        result.payment_payload,
+                        existing_cache_control,
+                    )
+                    if isinstance(failure_headers, dict):
+                        for key, value in failure_headers.items():
+                            response_wrapper.add_header(key, value)
                     response_wrapper.send_response(body_chunks)
                     return []
 
                 # Check if successful response
-                if (
-                    response_wrapper.status_code is not None
-                    and 200 <= response_wrapper.status_code < 300
-                ):
+                if response_wrapper.status_code is not None and response_wrapper.status_code < 400:
                     # Extract settlement overrides from response headers and strip them
                     overrides = self._http_server._extract_settlement_overrides(
                         response_wrapper.headers,
@@ -441,12 +528,38 @@ class PaymentMiddleware:
                             settlement_overrides=overrides,
                             declared_extensions=result.declared_extensions,
                             transport_context=transport_context,
+                            before_handler_settlement=result.before_handler_settlement,
                         )
 
                         if settle_result.success:
                             # Add settlement headers
                             for key, value in settle_result.headers.items():
                                 response_wrapper.add_header(key, value)
+                            existing_cache_control = next(
+                                (
+                                    value
+                                    for key, value in response_wrapper.headers
+                                    if key.lower() == "cache-control"
+                                ),
+                                None,
+                            )
+                            private_cache_control = with_private_cache_control(
+                                existing_cache_control
+                            )
+                            cache_control_updated = False
+                            for index, (key, _) in enumerate(response_wrapper.headers):
+                                if key.lower() == "cache-control":
+                                    response_wrapper.headers[index] = (
+                                        key,
+                                        private_cache_control,
+                                    )
+                                    cache_control_updated = True
+                                    break
+                            if not cache_control_updated:
+                                response_wrapper.add_header(
+                                    "Cache-Control",
+                                    private_cache_control,
+                                )
                         else:
                             # Settlement failed - use response from process_settlement
                             # (includes PAYMENT-RESPONSE header and empty body by default)
@@ -458,12 +571,15 @@ class PaymentMiddleware:
                             else:
                                 status = f"{response.status} Payment Required"
                                 headers = list(response.headers.items())
+                                plain_text = _declared_plain_text_body(response)
                                 if response.is_html:
                                     body = (
                                         response.body.encode("utf-8")
                                         if isinstance(response.body, str)
                                         else response.body
                                     )
+                                elif plain_text is not None:
+                                    body = plain_text.encode("utf-8")
                                 else:
                                     body = json.dumps(response.body or {}).encode("utf-8")
                             start_response(status, headers)
@@ -473,12 +589,35 @@ class PaymentMiddleware:
                         return _facilitator_error_wsgi_response(start_response, error)
 
                     except Exception:
-                        # Settlement error - return empty body with 402
+                        # An unexpected error here (RPC failure, bug, ...) is a
+                        # server-side failure, not a payment problem. Log it so
+                        # operators get a signal (the module otherwise logs
+                        # nothing), and surface it as a settle failure
+                        # (402 + PAYMENT-RESPONSE, success=False) - consistent with
+                        # the not-settle_result.success path and distinguishable
+                        # from a genuine "payment required". The client-facing
+                        # reason stays generic; the raw exception detail is logged
+                        # only. Mirrors the FastAPI fix in #2622.
+                        logger.exception("x402: unexpected error while settling a verified payment")
+                        settle_response = SettleResponse(
+                            success=False,
+                            error_reason="unexpected_settle_error",
+                            error_message="Unexpected error during settlement",
+                            transaction="",
+                            network=result.payment_requirements.network,
+                        )
+                        settle_headers = self._http_server._create_settlement_headers(
+                            settle_response, result.payment_requirements
+                        )
                         start_response(
                             "402 Payment Required",
-                            [("Content-Type", "application/json")],
+                            [
+                                ("Content-Type", "application/json"),
+                                ("Cache-Control", PAYMENT_REQUIRED_CACHE_CONTROL),
+                                *settle_headers.items(),
+                            ],
                         )
-                        return [json.dumps({}).encode("utf-8")]
+                        return [json.dumps({"error": "settlement_failed"}).encode("utf-8")]
 
                 # Send buffered response
                 response_wrapper.send_response(body_chunks)
@@ -522,7 +661,7 @@ def payment_middleware(
         server: Pre-configured x402ResourceServerSync (must be sync variant).
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
-        sync_facilitator_on_start: Fetch facilitator support on first request.
+        sync_facilitator_on_start: Fetch facilitator support when the middleware is created.
 
     Returns:
         PaymentMiddleware instance.
@@ -550,7 +689,7 @@ def payment_middleware_from_config(
         schemes: Scheme registrations for server-side processing.
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
-        sync_facilitator_on_start: Fetch facilitator support on first request.
+        sync_facilitator_on_start: Fetch facilitator support when the middleware is created.
 
     Returns:
         PaymentMiddleware instance.

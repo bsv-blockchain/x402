@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from x402 import x402Client, x402ClientSync
 from x402.http.constants import (
     PAYMENT_REQUIRED_HEADER,
     PAYMENT_RESPONSE_HEADER,
@@ -210,6 +211,13 @@ class TestX402HTTPClientBase:
 
         assert isinstance(result, PaymentRequiredV1)
 
+    @pytest.mark.parametrize("body", [b"null", b"[]", b'"s"', b"1", b"true", b"false"])
+    def test_get_payment_required_rejects_non_object_bytes_body(self, body: bytes) -> None:
+        base = x402HTTPClientBase()
+
+        with pytest.raises(ValueError, match="Invalid payment required response"):
+            base.get_payment_required_response(lambda _name: None, body)
+
     def test_get_payment_required_raises_on_missing(self):
         """Test that ValueError is raised when no payment required info found."""
         base = x402HTTPClientBase()
@@ -310,7 +318,9 @@ class TestX402HTTPClient:
         encoded = encode_payment_required_header(payment_required)
         headers = {PAYMENT_REQUIRED_HEADER: encoded}
 
-        payment_headers, payload = await http_client.handle_402_response(headers, None)
+        payment_headers, payload = await http_client.handle_402_response(
+            headers, None, "https://api.example.com/"
+        )
 
         assert PAYMENT_SIGNATURE_HEADER in payment_headers
         assert payload.x402_version == 2
@@ -351,7 +361,9 @@ class TestX402HTTPClientSync:
         encoded = encode_payment_required_header(payment_required)
         headers = {PAYMENT_REQUIRED_HEADER: encoded}
 
-        payment_headers, payload = http_client.handle_402_response(headers, None)
+        payment_headers, payload = http_client.handle_402_response(
+            headers, None, "https://api.example.com/"
+        )
 
         assert PAYMENT_SIGNATURE_HEADER in payment_headers
         assert payload.x402_version == 2
@@ -455,6 +467,41 @@ class TestProcessPaymentResult:
 
         assert result.recovered is True
 
+    @pytest.mark.asyncio
+    async def test_settled_response_not_retried_when_hook_returns_a_value(self):
+        client = x402Client()
+        seen: list[str] = []
+        # A logging hook that happens to return something (list.append returns
+        # None, but a counter or a dict does not).
+        client.on_payment_response(lambda ctx: seen.append(ctx.settle_response.transaction) or {})
+        http_client = x402HTTPClient(client)
+        settle = SettleResponse(success=True, transaction="0xabc", network="eip155:8453")
+        encoded = encode_payment_response_header(settle)
+
+        result = await http_client.process_payment_result(
+            make_v2_payload(),
+            lambda name: encoded if name == PAYMENT_RESPONSE_HEADER else None,
+            200,
+        )
+
+        assert seen == ["0xabc"]
+        assert result.recovered is False
+
+    def test_sync_settled_response_not_retried_when_hook_returns_a_value(self):
+        client = x402ClientSync()
+        client.on_payment_response(lambda ctx: True)
+        http_client = x402HTTPClientSync(client)
+        settle = SettleResponse(success=True, transaction="0xabc", network="eip155:8453")
+        encoded = encode_payment_response_header(settle)
+
+        result = http_client.process_payment_result(
+            make_v2_payload(),
+            lambda name: encoded if name == PAYMENT_RESPONSE_HEADER else None,
+            200,
+        )
+
+        assert result.recovered is False
+
     def test_sync_v2_no_headers_skips_hooks(self):
         mock_client = MockX402ClientSync()
         http_client = x402HTTPClientSync(mock_client)
@@ -486,6 +533,7 @@ class TestPaymentRoundTripper:
             headers={},
             body=None,
             retry_func=lambda h: "should not be called",
+            request_url="https://api.example.com/",
         )
 
         assert result is None
@@ -515,6 +563,7 @@ class TestPaymentRoundTripper:
             headers=headers,
             body=None,
             retry_func=retry_func,
+            request_url="https://api.example.com/",
         )
 
         assert result == "retry_response"
@@ -541,6 +590,7 @@ class TestPaymentRoundTripper:
             headers=headers,
             body=None,
             retry_func=lambda h: "first",
+            request_url="https://api.example.com/",
         )
 
         # Manually set retry count to simulate already retried
@@ -554,4 +604,5 @@ class TestPaymentRoundTripper:
                 headers=headers,
                 body=None,
                 retry_func=lambda h: "should not happen",
+                request_url="https://api.example.com/",
             )

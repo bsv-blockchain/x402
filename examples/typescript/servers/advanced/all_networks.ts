@@ -5,13 +5,21 @@
  * optional chain configuration via environment variables.
  *
  * New chain support should be added here in alphabetic order by network prefix
- * (e.g., "algorand" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm").
+ * (e.g., "algorand" before "aptos" before "bsv" before "canton" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm" before "xrpl").
  */
 
 import { config } from "dotenv";
 import express from "express";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
+import { APTOS_TESTNET_CAIP2 } from "@x402/aptos";
+import { ExactAptosScheme } from "@x402/aptos/exact/server";
 import { ExactAvmScheme } from "@x402/avm/exact/server";
+import { ALGORAND_TESTNET_CAIP2 } from "@x402/avm";
+import { ExactBsvScheme } from "@x402/bsv/exact/server";
+import { createWhatsOnChainMoneyParser } from "@x402/bsv";
+import { ExactCardanoScheme } from "@x402/cardano/exact/server";
+import { ExactCasperScheme } from "@x402/casper/exact/server";
+import { ExactCantonScheme } from "@x402/canton/exact/server";
 import { ExactConcordiumScheme } from "@x402/concordium/exact/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactHederaScheme } from "@x402/hedera/exact/server";
@@ -22,6 +30,8 @@ import { NEAR_TESTNET_CAIP2 } from "@x402/near";
 import { ExactNearScheme } from "@x402/near/exact/server";
 import { ExactStellarScheme } from "@x402/stellar/exact/server";
 import { ExactTvmScheme } from "@x402/tvm/exact/server";
+import { XRPL_TESTNET } from "@x402/xrpl";
+import { ExactXrplScheme } from "@x402/xrpl/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import type { Network, Price } from "@x402/core/types";
 
@@ -29,6 +39,17 @@ config();
 
 // Configuration - optional per network
 const avmAddress = process.env.AVM_ADDRESS as string | undefined;
+const cardanoAddress = process.env.CARDANO_ADDRESS as string | undefined;
+const aptosAddress = process.env.APTOS_ADDRESS as string | undefined;
+// BSV payTo is the recipient wallet's identity public key, not an address.
+const bsvIdentityKey = process.env.BSV_IDENTITY_KEY as string | undefined;
+const casperAddress = process.env.CASPER_ADDRESS as string | undefined;
+// Canton: the merchant party to be paid, the instrument admin (DSO for Canton
+// Coin), and the synchronizer the payment settles on.
+const cantonAddress = process.env.CANTON_ADDRESS as string | undefined;
+const cantonInstrumentAdmin = process.env.CANTON_INSTRUMENT_ADMIN as string | undefined;
+const cantonSynchronizerId = process.env.CANTON_SYNCHRONIZER_ID as string | undefined;
+const cantonConfigured = Boolean(cantonAddress && cantonInstrumentAdmin && cantonSynchronizerId);
 const ccdAddress = process.env.CCD_ADDRESS as string | undefined;
 const evmAddress = process.env.EVM_ADDRESS as `0x${string}` | undefined;
 const hederaAddress = process.env.HEDERA_ACCOUNT_ID as string | undefined;
@@ -37,10 +58,16 @@ const nearAddress = process.env.NEAR_ADDRESS as string | undefined;
 const svmAddress = process.env.SVM_ADDRESS as string | undefined;
 const stellarAddress = process.env.STELLAR_ADDRESS as string | undefined;
 const tvmAddress = process.env.TVM_ADDRESS as string | undefined;
+const xrplAddress = process.env.XRPL_ADDRESS as string | undefined;
 
 // Validate at least one address is provided
 if (
   !avmAddress &&
+  !cardanoAddress &&
+  !aptosAddress &&
+  !bsvIdentityKey &&
+  !casperAddress &&
+  !cantonConfigured &&
   !ccdAddress &&
   !evmAddress &&
   !svmAddress &&
@@ -48,10 +75,11 @@ if (
   !nearAddress &&
   !stellarAddress &&
   !hederaAddress &&
-  !tvmAddress
+  !tvmAddress &&
+  !xrplAddress
 ) {
   console.error(
-    "❌ At least one of AVM_ADDRESS, CCD_ADDRESS, EVM_ADDRESS, KEETA_ADDRESS, NEAR_ADDRESS, SVM_ADDRESS, STELLAR_ADDRESS, HEDERA_ACCOUNT_ID, or TVM_ADDRESS is required",
+    "❌ At least one of AVM_ADDRESS, APTOS_ADDRESS, BSV_IDENTITY_KEY, CARDANO_ADDRESS, CASPER_ADDRESS, CANTON_ADDRESS + CANTON_INSTRUMENT_ADMIN + CANTON_SYNCHRONIZER_ID, CCD_ADDRESS, EVM_ADDRESS, KEETA_ADDRESS, NEAR_ADDRESS, SVM_ADDRESS, STELLAR_ADDRESS, HEDERA_ACCOUNT_ID, TVM_ADDRESS, or XRPL_ADDRESS is required",
   );
   process.exit(1);
 }
@@ -63,7 +91,19 @@ if (!facilitatorUrl) {
 }
 
 // Network configuration
-const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=" as const; // Algorand Testnet
+const AVM_NETWORK = (process.env.AVM_NETWORK || ALGORAND_TESTNET_CAIP2) as Network; // Algorand Testnet
+const CARDANO_NETWORK = "cardano:preprod" as const; // Cardano Preprod Testnet
+const APTOS_NETWORK = (process.env.APTOS_NETWORK || APTOS_TESTNET_CAIP2) as Network; // Aptos Testnet
+const BSV_NETWORK = (process.env.BSV_NETWORK || "bsv:mainnet") as Network; // BSV Mainnet
+const CASPER_NETWORK = (process.env.CASPER_NETWORK || "casper:casper-test") as Network; // Casper Testnet
+const CASPER_AMOUNT = (process.env.CASPER_AMOUNT || "900000") as string; // Casper CEP-18 amount (e.g., "1500000000" for 1.5 WCSPR)
+const CASPER_ASSET = (process.env.CASPER_ASSET ||
+  "0cb6f94834c60510d532b0ae077b18b4100874a4c867396d61c2b13c790ead52") as string; // Defaults to Casper WCSPR CEP-18
+const CASPER_TOKEN_NAME = (process.env.CASPER_TOKEN_NAME || "csprUSD") as string; // Casper CEP-18 token name (e.g., "csprUSD")
+const CASPER_TOKEN_VERSION = (process.env.CASPER_TOKEN_VERSION || "1") as string; // Casper CEP-18 token version
+// Canton CAIP-2 tier (canton:mainnet | canton:devnet); the synchronizer/domain
+// travels separately (signer config + extra.synchronizerId), not in the network id.
+const CANTON_NETWORK = (process.env.CANTON_NETWORK || "canton:mainnet") as Network;
 const CCD_NETWORK = "ccd:4221332d34e1694168c2a0c0b3fd0f27" as const; // Concordium Testnet
 const EVM_NETWORK = "eip155:84532" as const; // Base Sepolia
 const HEDERA_NETWORK = "hedera:testnet" as const; // Hedera Testnet
@@ -74,6 +114,7 @@ const STELLAR_NETWORK = "stellar:testnet" as const; // Stellar Testnet
 const HEDERA_HBAR_ASSET = "0.0.0" as const; // Native HBAR asset id
 const HEDERA_WEATHER_PRICE_TINYBARS = "100000" as const; // 0.001 HBAR
 const TVM_NETWORK = (process.env.TVM_NETWORK || "tvm:-3") as Network; // TON Testnet
+const XRPL_NETWORK = (process.env.XRPL_NETWORK || XRPL_TESTNET) as Network; // XRPL Testnet
 const CCD_WEATHER_PRICE_MICRO_CCD = "1000" as const; // 0.001 CCD
 
 // Build accepts array dynamically based on configured addresses
@@ -89,6 +130,70 @@ if (avmAddress) {
     price: "$0.001",
     network: AVM_NETWORK,
     payTo: avmAddress,
+  });
+}
+if (aptosAddress) {
+  accepts.push({
+    scheme: "exact",
+    price: "$0.001",
+    network: APTOS_NETWORK,
+    payTo: aptosAddress,
+  });
+}
+if (bsvIdentityKey) {
+  accepts.push({
+    scheme: "exact",
+    price: "$0.001", // converted to satoshis via the WhatsOnChain rate feed
+    network: BSV_NETWORK,
+    payTo: bsvIdentityKey,
+  });
+}
+const cardanoL1Confirmations = process.env.CARDANO_L1_CONFIRMATIONS?.trim();
+const cardanoExtra =
+  cardanoL1Confirmations && /^-?(0|[1-9]\d?)$/.test(cardanoL1Confirmations)
+    ? { confirmationPolicy: { l1Confirmations: Number(cardanoL1Confirmations) } }
+    : undefined;
+
+if (cardanoAddress) {
+  accepts.push({
+    scheme: "exact",
+    price: "$0.001",
+    network: CARDANO_NETWORK,
+    payTo: cardanoAddress,
+    ...(cardanoExtra ? { extra: cardanoExtra } : {}),
+  });
+}
+
+if (casperAddress) {
+  accepts.push({
+    scheme: "exact",
+    price: {
+      amount: CASPER_AMOUNT,
+      asset: CASPER_ASSET,
+      extra: {
+        name: CASPER_TOKEN_NAME,
+        version: CASPER_TOKEN_VERSION,
+        decimals: 6,
+      },
+    },
+    network: CASPER_NETWORK,
+    payTo: casperAddress,
+  });
+}
+
+if (cantonConfigured) {
+  accepts.push({
+    scheme: "exact",
+    // Canton prices are explicit AssetAmounts; the instrument admin (DSO for
+    // Canton Coin) travels in `extra.instrumentId`. feePayer + synchronizerId are
+    // merged from the facilitator's /supported by the server scheme.
+    price: {
+      amount: "100000000", // 0.01 CC (atomic: 1 CC = 1e10)
+      asset: "CC",
+      extra: { instrumentId: { admin: cantonInstrumentAdmin!, id: "Amulet" } },
+    },
+    network: CANTON_NETWORK,
+    payTo: cantonAddress!,
   });
 }
 if (ccdAddress) {
@@ -161,6 +266,17 @@ if (tvmAddress) {
     payTo: tvmAddress,
   });
 }
+if (xrplAddress) {
+  accepts.push({
+    scheme: "exact",
+    price: {
+      amount: process.env.XRPL_AMOUNT || "1000",
+      asset: "XRP",
+    },
+    network: XRPL_NETWORK,
+    payTo: xrplAddress,
+  });
+}
 
 // Create facilitator client
 const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
@@ -169,6 +285,24 @@ const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
 const server = new x402ResourceServer(facilitatorClient);
 if (avmAddress) {
   server.register(AVM_NETWORK, new ExactAvmScheme());
+}
+if (aptosAddress) {
+  server.register(APTOS_NETWORK, new ExactAptosScheme());
+}
+if (bsvIdentityKey) {
+  server.register(
+    BSV_NETWORK,
+    new ExactBsvScheme().registerMoneyParser(createWhatsOnChainMoneyParser()),
+  );
+}
+if (cardanoAddress) {
+  server.register(CARDANO_NETWORK, new ExactCardanoScheme());
+}
+if (casperAddress) {
+  server.register(CASPER_NETWORK, new ExactCasperScheme());
+}
+if (cantonConfigured) {
+  server.register(CANTON_NETWORK, new ExactCantonScheme());
 }
 if (ccdAddress) {
   server.register(CCD_NETWORK, new ExactConcordiumScheme());
@@ -193,6 +327,9 @@ if (stellarAddress) {
 }
 if (tvmAddress) {
   server.register(TVM_NETWORK, new ExactTvmScheme());
+}
+if (xrplAddress) {
+  server.register(XRPL_NETWORK, new ExactXrplScheme());
 }
 
 // Create Express app
@@ -234,6 +371,15 @@ app.listen(port, () => {
   if (avmAddress) {
     console.log(`   AVM: ${avmAddress} on ${AVM_NETWORK}`);
   }
+  if (aptosAddress) {
+    console.log(`   Aptos: ${aptosAddress} on ${APTOS_NETWORK}`);
+  }
+  if (cardanoAddress) {
+    console.log(`   Cardano: ${cardanoAddress} on ${CARDANO_NETWORK}`);
+  }
+  if (casperAddress) {
+    console.log(`   Casper: ${casperAddress} on ${CASPER_NETWORK}`);
+  }
   if (ccdAddress) {
     console.log(`   CCD: ${ccdAddress} on ${CCD_NETWORK}`);
   }
@@ -257,6 +403,9 @@ app.listen(port, () => {
   }
   if (tvmAddress) {
     console.log(`   TVM: ${tvmAddress} on ${TVM_NETWORK}`);
+  }
+  if (xrplAddress) {
+    console.log(`   XRPL: ${xrplAddress} on ${XRPL_NETWORK}`);
   }
   console.log(`   Facilitator: ${facilitatorUrl}`);
   console.log();

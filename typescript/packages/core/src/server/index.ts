@@ -1,4 +1,8 @@
-export { x402ResourceServer } from "./x402ResourceServer";
+export {
+  x402ResourceServer,
+  AfterSettleAbortError,
+  isAfterSettleAborted,
+} from "./x402ResourceServer";
 export type {
   ResourceConfig,
   PaymentRequiredContext,
@@ -8,10 +12,12 @@ export type {
   SettleContext,
   SettleResultContext,
   SettleFailureContext,
+  SettlePhase,
   VerifiedPaymentCanceledContext,
   VerifiedPaymentCancellationReason,
   VerifiedPaymentCancelOptions,
   PaymentCancellationDispatcher,
+  CompletedSettlement,
   SettlementOverrides,
   ExtensionValidationResult,
   SkipHandlerDirective,
@@ -24,11 +30,22 @@ export type {
   OnSettleFailureHook,
   OnVerifiedPaymentCanceledHook,
 } from "./x402ResourceServer";
+export {
+  SDK_DEFAULT_ASSET_TRANSFER_METHOD,
+  PAYMENT_FLOWS,
+  resolvePaymentFlow,
+  applyPaymentFlowWireExtra,
+  resolvePaymentFlowPhases,
+  resolveFailurePathSettlement,
+} from "./paymentFlow";
 export type {
   SchemeEnrichPaymentRequiredResponseHook,
   SchemePaymentRequiredContext,
   SchemeEnrichSettlementPayloadHook,
   SchemeEnrichSettlementResponseHook,
+  PaymentFlowName,
+  PaymentFlowPhases,
+  PaymentFlowConfig,
 } from "../types/mechanisms";
 
 export {
@@ -45,12 +62,22 @@ export type { SettleResponseCoreSnapshot } from "./hookPolicy";
 
 export { HTTPFacilitatorClient } from "../http/httpFacilitatorClient";
 export type { FacilitatorClient, FacilitatorConfig } from "../http/httpFacilitatorClient";
-export { FacilitatorResponseError, getFacilitatorResponseError } from "../types";
+export {
+  FacilitatorResponseError,
+  FacilitatorTimeoutError,
+  FacilitatorCapabilityError,
+  getFacilitatorResponseError,
+} from "../types";
+export { attachBackgroundInitHandler, isFatalStartupInitError } from "../http/backgroundInit";
+export { prepareHttpServer } from "../http/prepareHttpServer";
+export type { PreparedHttpServer } from "../http/prepareHttpServer";
 
 export {
   x402HTTPResourceServer,
   RouteConfigurationError,
   SETTLEMENT_OVERRIDES_HEADER,
+  PAYMENT_REQUIRED_CACHE_CONTROL,
+  withPrivateCacheControl,
   checkIfBazaarNeeded,
 } from "../http/x402HTTPResourceServer";
 export type {

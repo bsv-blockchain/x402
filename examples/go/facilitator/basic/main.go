@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -69,7 +70,7 @@ func main() {
 
 	if svmSigner != nil {
 		settlementCache := svmmech.NewSettlementCache()
-		facilitator.Register([]x402.Network{svmNetwork}, svm.NewExactSvmScheme(svmSigner, settlementCache))
+		facilitator.Register([]x402.Network{svmNetwork}, svm.NewExactSvmScheme(svmSigner, &svm.Config{SettlementCache: settlementCache}))
 		facilitator.RegisterV1([]x402.Network{"solana-devnet"}, svmv1.NewExactSvmSchemeV1(svmSigner, settlementCache))
 	}
 
@@ -96,6 +97,11 @@ func main() {
 
 	// Verify endpoint - verifies payment signatures
 	r.POST("/verify", func(c *gin.Context) {
+		endpointT0 := time.Now()
+		defer func() {
+			fmt.Printf("/verify completed in %.3fs\n", time.Since(endpointT0).Seconds())
+		}()
+
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 		defer cancel()
 
@@ -113,12 +119,18 @@ func main() {
 		// Verify payment
 		result, err := facilitator.Verify(ctx, reqBody.PaymentPayload, reqBody.PaymentRequirements)
 		if err != nil {
-			// All failures (business logic and system errors) are returned as errors
-			// You can extract structured information from VerifyError if needed:
-			// if ve, ok := err.(*x402.VerifyError); ok {
-			//     log.Printf("Verification failed: reason=%s, payer=%s, network=%s",
-			//                ve.Reason, ve.Payer, ve.Network)
-			// }
+			// Invalid payments come back as *x402.VerifyError and are answered with
+			// 200 {"isValid": false, ...}; any other error is a facilitator failure (500).
+			var verifyErr *x402.VerifyError
+			if errors.As(err, &verifyErr) {
+				c.JSON(http.StatusOK, x402.VerifyResponse{
+					IsValid:        false,
+					InvalidReason:  verifyErr.InvalidReason,
+					InvalidMessage: verifyErr.InvalidMessage,
+					Payer:          verifyErr.Payer,
+				})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -129,6 +141,11 @@ func main() {
 
 	// Settle endpoint - settles payments on-chain
 	r.POST("/settle", func(c *gin.Context) {
+		endpointT0 := time.Now()
+		defer func() {
+			fmt.Printf("/settle completed in %.3fs\n", time.Since(endpointT0).Seconds())
+		}()
+
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 		defer cancel()
 

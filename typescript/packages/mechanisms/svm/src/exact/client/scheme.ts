@@ -1,7 +1,3 @@
-import {
-  getSetComputeUnitLimitInstruction,
-  setTransactionMessageComputeUnitPrice,
-} from "@solana-program/compute-budget";
 import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import {
   findAssociatedTokenPda,
@@ -14,7 +10,6 @@ import {
   getBase64EncodedWireTransaction,
   partiallySignTransactionMessageWithSigners,
   pipe,
-  prependTransactionMessageInstruction,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
   type Address,
@@ -28,14 +23,17 @@ import {
 } from "../../constants";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
 import type { ExactSvmPayloadV2 } from "../../types";
-import { createRpcClient } from "../../utils";
+import { applyTransactionV1Config, computeBudgetInstructions } from "../../transactionV1";
+import { createRpcClient, resolveBlockhash, resolveTransactionVersion } from "../../utils";
 import { getCachedMintMetadata, type MintMetadataCache } from "../../mint-cache";
+import { findDefaultAsset } from "../../defaultAssets";
 
 /**
  * SVM client implementation for the Exact payment scheme.
  */
 export class ExactSvmScheme implements SchemeNetworkClient {
   readonly scheme = "exact";
+  findDefaultAsset = findDefaultAsset;
   private readonly mintCache: MintMetadataCache = new Map();
 
   /**
@@ -61,6 +59,10 @@ export class ExactSvmScheme implements SchemeNetworkClient {
     x402Version: number,
     paymentRequirements: PaymentRequirements,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
+    const transactionVersion = resolveTransactionVersion(
+      paymentRequirements.extra,
+      this.config?.transactionVersions,
+    );
     const rpc = createRpcClient(paymentRequirements.network, this.config?.rpcUrl);
 
     const mintMetadata = await getCachedMintMetadata(
@@ -108,7 +110,7 @@ export class ExactSvmScheme implements SchemeNetworkClient {
       throw new Error("feePayer is required in paymentRequirements.extra for SVM transactions");
     }
 
-    const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+    const latestBlockhash = await resolveBlockhash(rpc, paymentRequirements);
 
     const sellerMemo = paymentRequirements.extra?.memo as string | undefined;
     let memoData: Uint8Array;
@@ -131,16 +133,21 @@ export class ExactSvmScheme implements SchemeNetworkClient {
       data: memoData,
     };
 
+    // Version 0 carries the budget as a ComputeBudget instruction prefix;
+    // version 1 carries it in the message config and has no such prefix.
+    const budget = {
+      computeUnitLimit: DEFAULT_COMPUTE_UNIT_LIMIT,
+      computeUnitPriceMicroLamports: DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+    };
     const tx = pipe(
-      createTransactionMessage({ version: 0 }),
-      tx => setTransactionMessageComputeUnitPrice(DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS, tx),
+      createTransactionMessage({ version: transactionVersion }),
+      tx => applyTransactionV1Config(transactionVersion, budget, tx),
       tx => setTransactionMessageFeePayer(feePayer, tx),
       tx =>
-        prependTransactionMessageInstruction(
-          getSetComputeUnitLimitInstruction({ units: DEFAULT_COMPUTE_UNIT_LIMIT }),
+        appendTransactionMessageInstructions(
+          [...computeBudgetInstructions(transactionVersion, budget), transferIx, memoIx],
           tx,
         ),
-      tx => appendTransactionMessageInstructions([transferIx, memoIx], tx),
       tx => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, tx),
     );
 

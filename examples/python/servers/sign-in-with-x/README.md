@@ -25,7 +25,7 @@ server = x402ResourceServer(facilitator)
 server.register("eip155:84532", ExactEvmServerScheme())
 server.register_extension(
     create_siwx_resource_server_extension(
-        CreateSIWxHookOptions(storage=storage, on_event=on_event)
+        CreateSIWxHookOptions(storage=storage, origin="https://api.example.com", on_event=on_event)
     )
 )
 
@@ -66,7 +66,7 @@ At least one of `EVM_ADDRESS` or `SVM_ADDRESS` is required.
 2. Install dependencies:
 
 ```bash
-uv sync
+uv sync --reinstall-package x402
 ```
 
 3. Run the server:
@@ -84,7 +84,7 @@ Start the SIWX client to test:
 ```bash
 cd ../../clients/sign-in-with-x
 # Ensure .env is setup with EVM_PRIVATE_KEY or SVM_PRIVATE_KEY
-uv sync
+uv sync --reinstall-package x402
 uv run python main.py
 ```
 
@@ -144,7 +144,7 @@ if SVM_ADDRESS:
 
 server.register_extension(
     create_siwx_resource_server_extension(
-        CreateSIWxHookOptions(storage=storage, on_event=on_event)
+        CreateSIWxHookOptions(storage=storage, origin="https://api.example.com", on_event=on_event)
     )
 )
 ```
@@ -202,7 +202,7 @@ def on_event(event: dict) -> None:
     print(f"[SIWX] {event['type']}", event)
 
 create_siwx_resource_server_extension(
-    CreateSIWxHookOptions(storage=storage, on_event=on_event)
+    CreateSIWxHookOptions(storage=storage, origin="https://api.example.com", on_event=on_event)
 )
 ```
 

@@ -7,6 +7,11 @@ import pytest
 try:
     from eth_account import Account
 
+    from x402.interfaces import PaymentPayloadContext
+    from x402.mechanisms.evm.batch_settlement.client.channel import (
+        BatchSettlementClientDeps,
+        build_channel_config,
+    )
     from x402.mechanisms.evm.batch_settlement.client.config import (
         BatchSettlementDepositPolicy,
         BatchSettlementEvmSchemeOptions,
@@ -21,10 +26,16 @@ try:
     from x402.mechanisms.evm.batch_settlement.constants import (
         SCHEME_BATCH_SETTLEMENT,
     )
-    from x402.mechanisms.evm.batch_settlement.types import ChannelConfig
+    from x402.mechanisms.evm.batch_settlement.types import ChannelConfig, is_voucher_payload
     from x402.mechanisms.evm.batch_settlement.utils import compute_channel_id
+    from x402.mechanisms.evm.signer import _reset_sponsoring_warnings
     from x402.mechanisms.evm.signers import EthAccountSigner
-    from x402.schemas import PaymentRequirements, SettleResponse
+    from x402.schemas import (
+        PaymentPayload,
+        PaymentRequirements,
+        PaymentResponseContext,
+        SettleResponse,
+    )
 except ImportError:
     pytest.skip("batch_settlement requires evm extras", allow_module_level=True)
 
@@ -34,6 +45,7 @@ TOKEN = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 RECEIVER = "0x3333333333333333333333333333333333333333"
 RECEIVER_AUTHORIZER = "0x4444444444444444444444444444444444444444"
 TEST_PRIVATE_KEY = "0xa915e4eaadfaa5e6f59574d2c8e1d2a4cd2b6c0c0b9f6a3c7d9e2b8f5a4e3c2d"
+SPEND_CAP = PaymentPayloadContext(max_amount_per_payment="1000000")
 
 
 def _signer() -> EthAccountSigner:
@@ -175,29 +187,216 @@ class TestCreatePaymentPayload:
         with pytest.raises(ValueError, match="assetTransferMethod"):
             s.create_payment_payload(req)
 
-
-class TestProcessSettleResponse:
-    def test_updates_client_storage(self):
+    def test_uses_deposit_multiplier_when_depositing(self):
         signer = _signer()
-        storage = InMemoryClientChannelStorage()
-        s = BatchSettlementEvmScheme(signer, BatchSettlementEvmSchemeOptions(storage=storage))
-        settle = SettleResponse(
-            success=True,
-            transaction="0xtx",
-            network=NETWORK,
+        s = BatchSettlementEvmScheme(signer, BatchSettlementDepositPolicy(deposit_multiplier=7))
+        result = s.create_payment_payload(_requirements(amount="1000"), context=SPEND_CAP)
+        assert result["deposit"]["amount"] == "7000"
+
+    def test_honors_valid_extra_min_deposit_over_deposit_multiplier(self):
+        signer = _signer()
+        s = BatchSettlementEvmScheme(signer, BatchSettlementDepositPolicy(deposit_multiplier=7))
+        result = s.create_payment_payload(
+            _requirements(
+                amount="1000",
+                extra={
+                    "name": "USDC",
+                    "version": "2",
+                    "receiverAuthorizer": RECEIVER_AUTHORIZER,
+                    "withdrawDelay": 900,
+                    "minDeposit": "15000",
+                },
+            ),
+            context=SPEND_CAP,
+        )
+        assert result["deposit"]["amount"] == "15000"
+
+    def test_falls_back_to_deposit_multiplier_when_extra_min_deposit_is_below_amount(self):
+        signer = _signer()
+        s = BatchSettlementEvmScheme(signer, BatchSettlementDepositPolicy(deposit_multiplier=5))
+        result = s.create_payment_payload(
+            _requirements(
+                amount="1000",
+                extra={
+                    "name": "USDC",
+                    "version": "2",
+                    "receiverAuthorizer": RECEIVER_AUTHORIZER,
+                    "withdrawDelay": 900,
+                    "minDeposit": "500",
+                },
+            ),
+            context=SPEND_CAP,
+        )
+        assert result["deposit"]["amount"] == "5000"
+
+    def test_clamps_extra_min_deposit_to_spend_cap_times_deposit_multiplier(self):
+        signer = _signer()
+        s = BatchSettlementEvmScheme(signer, BatchSettlementDepositPolicy(deposit_multiplier=5))
+        result = s.create_payment_payload(
+            _requirements(
+                amount="1000",
+                extra={
+                    "name": "USDC",
+                    "version": "2",
+                    "receiverAuthorizer": RECEIVER_AUTHORIZER,
+                    "withdrawDelay": 900,
+                    "minDeposit": "15000",
+                },
+            ),
+            context=PaymentPayloadContext(max_amount_per_payment="800"),
+        )
+        assert result["deposit"]["amount"] == "4000"
+
+    def test_rejects_a_deposit_when_the_voucher_gap_exceeds_spend_cap_times_multiplier(self):
+        signer = _signer()
+        s = BatchSettlementEvmScheme(signer)
+        with pytest.raises(ValueError, match="exceeds deposit_multiplier"):
+            s.create_payment_payload(
+                _requirements(amount="1000"),
+                context=PaymentPayloadContext(max_amount_per_payment="100"),
+            )
+
+    def test_allows_a_deposit_when_no_spend_cap_is_configured(self):
+        signer = _signer()
+        s = BatchSettlementEvmScheme(signer)
+        result = s.create_payment_payload(_requirements(amount="1000"))
+        assert result["deposit"]["amount"] == "5000"
+
+    def test_warns_once_and_skips_sponsored_permit_when_signer_cannot_read(self, caplog):
+        _reset_sponsoring_warnings()
+        signer = _signer()
+        scheme = BatchSettlementEvmScheme(signer)
+        requirements = _requirements(
+            amount="100",
             extra={
-                "channelState": {
-                    "channelId": "0xabc",
-                    "balance": "500",
-                    "totalClaimed": "100",
-                    "chargedCumulativeAmount": "100",
-                }
+                "receiverAuthorizer": RECEIVER_AUTHORIZER,
+                "name": "USDC",
+                "version": "2",
+                "assetTransferMethod": "permit2",
             },
         )
-        s.process_settle_response(settle)
-        got = storage.get("0xabc")
-        assert got is not None
-        assert got.balance == "500"
+        advertised = {"eip2612GasSponsoring": {}}
+
+        with caplog.at_level("WARNING", logger="x402.mechanisms.evm.signer"):
+            result = scheme.create_payment_payload(requirements, advertised)
+
+        extensions = result.get("__extensions") or {}
+        assert "eip2612GasSponsoring" not in extensions
+        warnings = [
+            record for record in caplog.records if "cannot read the chain" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+
+
+def _make_payment_payload(payload: dict) -> PaymentPayload:
+    return PaymentPayload(x402_version=2, accepted=_requirements(), payload=payload)
+
+
+def _make_settle(signer_address: str, extra: dict) -> SettleResponse:
+    return SettleResponse(
+        success=True,
+        transaction="0x",
+        network=NETWORK,
+        payer=signer_address,
+        extra=extra,
+    )
+
+
+def _deps(
+    signer: EthAccountSigner,
+    storage: InMemoryClientChannelStorage,
+) -> BatchSettlementClientDeps:
+    return BatchSettlementClientDeps(
+        signer=signer,
+        storage=storage,
+        salt="0x" + "00" * 32,
+    )
+
+
+class TestSchemeHooksOnPaymentResponse:
+    def test_delegates_to_update_channel_from_settle(self):
+        signer = _signer()
+        storage = InMemoryClientChannelStorage()
+        client = BatchSettlementEvmScheme(signer, BatchSettlementEvmSchemeOptions(storage=storage))
+        requirements = _requirements(amount="1000")
+        channel_id = compute_channel_id(
+            build_channel_config(_deps(signer, storage), requirements), NETWORK
+        )
+        storage.set(
+            channel_id.lower(),
+            BatchSettlementClientContext(
+                balance="9000",
+                charged_cumulative_amount="0",
+            ),
+        )
+
+        client.scheme_hooks.on_payment_response(
+            PaymentResponseContext(
+                payment_payload=_make_payment_payload({"type": "voucher"}),
+                requirements=requirements,
+                settle_response=_make_settle(
+                    signer.address,
+                    {
+                        "chargedAmount": "1000",
+                        "channelState": {
+                            "channelId": channel_id,
+                            "chargedCumulativeAmount": "1000",
+                            "balance": "9000",
+                        },
+                    },
+                ),
+            )
+        )
+
+        ctx = storage.get(channel_id.lower())
+        assert ctx is not None
+        assert ctx.charged_cumulative_amount == "1000"
+        assert ctx.balance == "9000"
+
+    def test_ignores_inflated_server_cumulative_so_the_next_voucher_is_not_the_remaining_escrow(
+        self,
+    ):
+        signer = _signer()
+        storage = InMemoryClientChannelStorage()
+        client = BatchSettlementEvmScheme(signer, BatchSettlementEvmSchemeOptions(storage=storage))
+        requirements = _requirements(amount="10000")
+        channel_id = compute_channel_id(
+            build_channel_config(_deps(signer, storage), requirements), NETWORK
+        )
+        storage.set(
+            channel_id.lower(),
+            BatchSettlementClientContext(
+                balance="50000",
+                charged_cumulative_amount="0",
+            ),
+        )
+
+        client.scheme_hooks.on_payment_response(
+            PaymentResponseContext(
+                payment_payload=_make_payment_payload({"type": "voucher"}),
+                requirements=requirements,
+                settle_response=_make_settle(
+                    signer.address,
+                    {
+                        "chargedAmount": "10000",
+                        "channelState": {
+                            "channelId": channel_id,
+                            "chargedCumulativeAmount": "40000",
+                            "balance": "50000",
+                        },
+                    },
+                ),
+            )
+        )
+
+        ctx = storage.get(channel_id.lower())
+        assert ctx is not None
+        assert ctx.charged_cumulative_amount == "0"
+        assert ctx.balance == "50000"
+
+        result = client.create_payment_payload(requirements)
+        assert is_voucher_payload(result)
+        assert result["voucher"]["maxClaimableAmount"] == "10000"
 
 
 class TestBuildChannelConfig:

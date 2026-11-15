@@ -7,7 +7,12 @@ import type {
 } from "@x402/core/types";
 import { parsePaymentRequired } from "@x402/core/schemas";
 import { x402Client } from "@x402/core/client";
-import type { x402ClientConfig } from "@x402/core/client";
+import type {
+  PaymentPolicy,
+  SelectPaymentRequirements,
+  SpendControls,
+  x402ClientConfig,
+} from "@x402/core/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 import type {
@@ -23,6 +28,94 @@ import {
   isPaymentRequiredError,
 } from "../types";
 import { extractPaymentResponseFromMeta } from "../utils";
+
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const DEFAULT_PROBE_TIMEOUT_SECONDS = 300;
+const DEFAULT_ACCEPT_TIMEOUT_SECONDS = 300;
+const DEFAULT_MAX_REQUEST_TIMEOUT_SECONDS = 600;
+
+/**
+ * Normalizes client maxRequestTimeoutSeconds (default 600).
+ *
+ * @param explicit - Constructor option
+ * @returns Cap in seconds
+ */
+function resolveMaxRequestTimeoutSeconds(explicit: number | undefined): number {
+  if (explicit === undefined) {
+    return DEFAULT_MAX_REQUEST_TIMEOUT_SECONDS;
+  }
+  if (!Number.isFinite(explicit) || explicit <= 0) {
+    throw new Error(
+      `maxRequestTimeoutSeconds must be a positive finite number, got ${explicit}`,
+    );
+  }
+  return explicit;
+}
+
+/**
+ * Accept maxTimeoutSeconds when valid, else 300.
+ *
+ * @param maxTimeoutSeconds - From payment accept
+ * @returns Timeout in seconds
+ */
+function effectiveAcceptTimeoutSeconds(maxTimeoutSeconds: number | undefined): number {
+  if (
+    maxTimeoutSeconds !== undefined &&
+    Number.isFinite(maxTimeoutSeconds) &&
+    maxTimeoutSeconds > 0
+  ) {
+    return maxTimeoutSeconds;
+  }
+  return DEFAULT_ACCEPT_TIMEOUT_SECONDS;
+}
+
+/**
+ * Converts seconds to milliseconds capped for timer safety.
+ *
+ * @param seconds - Duration in seconds
+ * @returns Milliseconds
+ */
+function clampTimeoutMs(seconds: number): number {
+  const ms = Math.floor(seconds * 1000);
+  return Math.min(ms, MAX_TIMEOUT_MS);
+}
+
+/**
+ * Probe call timeout in milliseconds.
+ *
+ * @param perCallTimeoutMs - Explicit callTool timeout override
+ * @param capSeconds - Client maxRequestTimeoutSeconds
+ * @returns Milliseconds for MCP SDK
+ */
+function probeTimeoutMs(
+  perCallTimeoutMs: number | undefined,
+  capSeconds: number,
+): number {
+  if (perCallTimeoutMs !== undefined) {
+    return perCallTimeoutMs;
+  }
+  return clampTimeoutMs(Math.min(DEFAULT_PROBE_TIMEOUT_SECONDS, capSeconds));
+}
+
+/**
+ * Paid retry timeout in milliseconds.
+ *
+ * @param perCallTimeoutMs - Explicit callTool timeout override
+ * @param maxTimeoutSeconds - From signed accept
+ * @param capSeconds - Client maxRequestTimeoutSeconds
+ * @returns Milliseconds for MCP SDK
+ */
+function paidTimeoutMs(
+  perCallTimeoutMs: number | undefined,
+  maxTimeoutSeconds: number | undefined,
+  capSeconds: number,
+): number {
+  if (perCallTimeoutMs !== undefined) {
+    return perCallTimeoutMs;
+  }
+  const acceptSeconds = effectiveAcceptTimeoutSeconds(maxTimeoutSeconds);
+  return clampTimeoutMs(Math.min(acceptSeconds, capSeconds));
+}
 
 // ============================================================================
 // MCP SDK Result Types
@@ -167,7 +260,9 @@ export interface x402MCPToolCallResult {
 export class x402MCPClient {
   private readonly mcpClient: Client;
   private readonly _paymentClient: x402Client;
-  private readonly options: Required<x402MCPClientOptions>;
+  private readonly options: Required<Omit<x402MCPClientOptions, "maxRequestTimeoutSeconds">> & {
+    maxRequestTimeoutSeconds: number;
+  };
   private readonly paymentRequiredHooks: PaymentRequiredHook[] = [];
   private readonly beforePaymentHooks: BeforePaymentHook[] = [];
   private readonly afterPaymentHooks: AfterPaymentHook[] = [];
@@ -189,6 +284,9 @@ export class x402MCPClient {
     this.options = {
       autoPayment: options.autoPayment ?? true,
       onPaymentRequested: options.onPaymentRequested ?? (() => true),
+      maxRequestTimeoutSeconds: resolveMaxRequestTimeoutSeconds(
+        options.maxRequestTimeoutSeconds,
+      ),
     };
   }
 
@@ -453,7 +551,7 @@ export class x402MCPClient {
    * @param name - The name of the tool to call
    * @param args - Arguments to pass to the tool
    * @param options - Optional MCP request options (timeout, signal, etc.)
-   * @param options.timeout - Request timeout in milliseconds (default: 60000)
+   * @param options.timeout - Request timeout in milliseconds (overrides accept `maxTimeoutSeconds`)
    * @param options.signal - AbortSignal for cancellation
    * @param options.resetTimeoutOnProgress - If true, progress notifications reset the timeout
    * @returns The tool result with payment metadata
@@ -466,6 +564,12 @@ export class x402MCPClient {
     args: Record<string, unknown> = {},
     options?: { timeout?: number; signal?: AbortSignal; resetTimeoutOnProgress?: boolean },
   ): Promise<x402MCPToolCallResult> {
+    const capSeconds = this.options.maxRequestTimeoutSeconds;
+    const probeOptions = {
+      ...options,
+      timeout: probeTimeoutMs(options?.timeout, capSeconds),
+    };
+
     // First attempt without payment
     let result: MCPCallToolResult;
     let paymentRequired: PaymentRequired | null = null;
@@ -474,7 +578,7 @@ export class x402MCPClient {
       const rawResult = await this.mcpClient.callTool(
         { name, arguments: args },
         undefined,
-        options,
+        probeOptions,
       );
 
       if (!isMCPCallToolResult(rawResult)) {
@@ -572,7 +676,7 @@ export class x402MCPClient {
    * @param args - Arguments to pass to the tool
    * @param paymentPayload - The payment payload to include
    * @param options - Optional MCP request options (timeout, signal, etc.)
-   * @param options.timeout - Request timeout in milliseconds (default: 60000)
+   * @param options.timeout - Request timeout in milliseconds (overrides accept `maxTimeoutSeconds`)
    * @param options.signal - AbortSignal for cancellation
    * @param options.resetTimeoutOnProgress - If true, progress notifications reset the timeout
    * @returns The tool result with payment metadata
@@ -583,6 +687,15 @@ export class x402MCPClient {
     paymentPayload: PaymentPayload,
     options?: { timeout?: number; signal?: AbortSignal; resetTimeoutOnProgress?: boolean },
   ): Promise<x402MCPToolCallResult> {
+    const paidOptions = {
+      ...options,
+      timeout: paidTimeoutMs(
+        options?.timeout,
+        paymentPayload.accepted?.maxTimeoutSeconds,
+        this.options.maxRequestTimeoutSeconds,
+      ),
+    };
+
     // Build the call parameters with payment metadata
     // Note: The MCP SDK's callTool accepts _meta but the types don't always expose it
     const callParams = {
@@ -594,7 +707,7 @@ export class x402MCPClient {
     };
 
     // Call with payment in _meta
-    const result = await this.mcpClient.callTool(callParams, undefined, options);
+    const result = await this.mcpClient.callTool(callParams, undefined, paidOptions);
 
     // Validate result structure
     if (!isMCPCallToolResult(result)) {
@@ -633,8 +746,43 @@ export class x402MCPClient {
 
     // A paid attempt can return a corrective 402. Scheme hooks recover local
     // state from it, then we retry once with a fresh payload from that response.
+    // Corrective terms (amount/asset/payTo) are server-controlled — re-run the
+    // same approval / abort gates used for the first payment before signing again.
     if (recoveryResult?.recovered && paymentRequired) {
-      const freshPayload = await this._paymentClient.createPaymentPayload(paymentRequired);
+      const correctiveRequiredContext: PaymentRequiredContext = {
+        toolName: name,
+        arguments: args,
+        paymentRequired,
+      };
+      let correctivePayload: PaymentPayload | undefined;
+      for (const hook of this.paymentRequiredHooks) {
+        const hookResult = await hook(correctiveRequiredContext);
+        if (hookResult?.abort) {
+          throw new Error("Payment aborted by hook");
+        }
+        if (hookResult?.payment) {
+          correctivePayload = hookResult.payment;
+          break;
+        }
+      }
+      if (!correctivePayload) {
+        const correctiveRequestedContext: PaymentRequestedContext = {
+          toolName: name,
+          arguments: args,
+          paymentRequired,
+        };
+        const correctiveApproved =
+          await this.options.onPaymentRequested(correctiveRequestedContext);
+        if (!correctiveApproved) {
+          throw new Error("Payment request denied");
+        }
+        for (const hook of this.beforePaymentHooks) {
+          await hook(correctiveRequestedContext);
+        }
+        correctivePayload = await this._paymentClient.createPaymentPayload(paymentRequired);
+      }
+
+      const freshPayload = correctivePayload;
       const retryCallParams = {
         name,
         arguments: args,
@@ -642,7 +790,15 @@ export class x402MCPClient {
           [MCP_PAYMENT_META_KEY]: freshPayload,
         },
       };
-      const retryResult = await this.mcpClient.callTool(retryCallParams, undefined, options);
+      const retryPaidOptions = {
+        ...options,
+        timeout: paidTimeoutMs(
+          options?.timeout,
+          freshPayload.accepted?.maxTimeoutSeconds,
+          this.options.maxRequestTimeoutSeconds,
+        ),
+      };
+      const retryResult = await this.mcpClient.callTool(retryCallParams, undefined, retryPaidOptions);
 
       if (!isMCPCallToolResult(retryResult)) {
         throw new Error("Invalid MCP tool result: missing content array");
@@ -858,6 +1014,28 @@ export interface x402MCPClientConfig {
   }>;
 
   /**
+   * Optional spend / selection policies (same as x402Client.fromConfig).
+   * Use these to cap amount, filter assets/networks, etc.
+   *
+   * @example
+   * ```typescript
+   * policies: [
+   *   (_version, reqs) => reqs.filter(r => BigInt(r.amount) < 1_000_000n),
+   * ],
+   * ```
+   */
+  policies?: PaymentPolicy[];
+
+  /** Forwarded to x402Client (default assets only + `$1` USD cap; `false` disables all). */
+  spendControls?: SpendControls | false;
+
+  /**
+   * Custom selector for which accept entry to pay.
+   * Default (via x402Client) is server-ordered accepts[0] — prefer an explicit selector in production.
+   */
+  paymentRequirementsSelector?: SelectPaymentRequirements;
+
+  /**
    * Whether to automatically retry tool calls with payment on 402 errors.
    *
    * @default true
@@ -973,6 +1151,10 @@ export function wrapMCPClientWithPaymentFromConfig(
  *   schemes: [
  *     { network: "eip155:84532", client: new ExactEvmScheme(account) },
  *   ],
+ *   // Optional spend policies
+ *   policies: [
+ *     (_v, reqs) => reqs.filter(r => BigInt(r.amount ?? "0") < 1_000_000n),
+ *   ],
  *   autoPayment: true,
  *   onPaymentRequested: async ({ paymentRequired }) => {
  *     console.log(`Payment required: ${paymentRequired.accepts[0].amount}`);
@@ -1001,17 +1183,13 @@ export function createx402MCPClient(config: x402MCPClientConfig): x402MCPClient 
     config.mcpClientOptions,
   );
 
-  // Create x402 payment client
-  const paymentClient = new x402Client();
-
-  // Register schemes
-  for (const scheme of config.schemes) {
-    if (scheme.x402Version === 1) {
-      paymentClient.registerV1(scheme.network, scheme.client);
-    } else {
-      paymentClient.register(scheme.network, scheme.client);
-    }
-  }
+  // Apply schemes (and optional policies/spendControls) via fromConfig.
+  const paymentClient = x402Client.fromConfig({
+    schemes: config.schemes,
+    policies: config.policies,
+    spendControls: config.spendControls,
+    paymentRequirementsSelector: config.paymentRequirementsSelector,
+  });
 
   // Create x402MCPClient with options
   return new x402MCPClient(mcpClient, paymentClient, {

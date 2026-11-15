@@ -11,6 +11,9 @@ Express.js facilitator service demonstrating advanced x402 patterns including al
 - Stellar private key with testnet XLM for transaction fees (fund via [Stellar Laboratory](https://lab.stellar.org/account/create) ➡️ Generate keypair ➡️ Fund account with Friendbot)
 - Hedera account id + private key for Hedera testnet fees (optional)
 - Keeta mnemonic (seed phrase) and wallet with Testnet KTA for transaction fees (create wallet on [Keeta Testnet Wallet](https://wallet.test.keeta.com/) and fund via [Keeta Testnet Faucet](https://faucet.test.keeta.com/))
+- Cardano: a Blockfrost project id (preprod/preview) for chain queries and submission, plus an optional facilitator mnemonic — the facilitator only broadcasts the client's signed transaction, so it needs **no funds**
+- No XRPL account or key: the XRPL facilitator is keyless (the payer signs and pays transaction fees); set `XRPL_NETWORK` to enable it (optional)
+- Casper private key with testnet CSPR for transaction fees (fund via the [CSPR.live testnet faucet](https://testnet.cspr.live/tools/faucet))
 
 ## Setup
 
@@ -22,6 +25,15 @@ cp .env-local .env
 
 and fill required environment variables:
 
+- `APTOS_PRIVATE_KEY` - Aptos Ed25519 private key for fee payer (optional; `all-networks`)
+- `APTOS_RPC_URL` - Aptos RPC URL (optional; `all-networks`)
+- `BSV_SERVER_PRIVATE_KEY` - private key for the BSV server wallet that receives payments (optional; `all-networks`; settlement internalizes into this wallet)
+- `BSV_WALLET_STORAGE_URL` - BSV wallet storage endpoint (optional; defaults to `https://store-us-1.bsvb.tech`)
+- `BSV_NETWORK` - BSV network CAIP-2 (optional; defaults to `bsv:mainnet`; also `bsv:testnet`, `bsv:ttn`, `bsv:tstn`)
+- `CASPER_PRIVATE_KEY` - Casper private key as 64-character hex (optional; `all-networks`)
+- `CASPER_PRIVATE_KEY_ALGORITHM` - Casper private key algorithm, either `ed25519` (default) or `secp256k1` (optional; `all-networks`)
+- `CASPER_NETWORK` - Casper network CAIP-2 (optional; defaults to `casper:casper-test`)
+- `CASPER_RPC_URL` - Casper JSON-RPC URL (optional; defaults to the SDK testnet RPC for known networks)
 - `CCD_FACILITATOR_PRIVATE_KEY` - Concordium Ed25519 private key for sponsor signing (optional; `all-networks`)
 - `CCD_FACILITATOR_ADDRESS` - Concordium sponsor account address (optional; `all-networks`)
 - `CCD_NETWORK` - Concordium network CAIP-2 (optional; defaults to `ccd:4221332d34e1694168c2a0c0b3fd0f27`)
@@ -31,6 +43,12 @@ and fill required environment variables:
 - `HEDERA_ACCOUNT_ID` - Hedera account id for fee payer (optional)
 - `HEDERA_PRIVATE_KEY` - Hedera **ECDSA** private key (0x-prefixed or DER-encoded) for fee payer (optional)
 - `KEETA_MNEMONIC` - Keeta mnemonic
+- `CARDANO_MNEMONIC` - Cardano facilitator mnemonic (optional; only exposes an address — the facilitator needs no funds)
+- `CARDANO_NETWORK` - Cardano network (optional, defaults to `cardano:preprod`)
+- `CARDANO_L1_CONFIRMATIONS` - Optional confirmation policy (`-1..20`; `-1` enables mempool settlement)
+- `BLOCKFROST_PROJECT_ID` / `BLOCKFROST_PREPROD_URL` - Blockfrost project id + endpoint (required for Cardano chain queries and submission)
+- `XRPL_NETWORK` - XRPL network CAIP-2 (e.g., `xrpl:1` for XRPL Testnet); set to enable the keyless XRPL scheme (optional; `all-networks`)
+- `XRPL_WS_URL` - Custom XRPL WebSocket endpoint (optional, defaults to the public endpoint for `XRPL_NETWORK`)
 - `PORT` - Server port (optional, defaults to 4022)
 
 2. Install and build all packages from the typescript examples root:
@@ -48,6 +66,23 @@ pnpm dev:all-networks   # All supported networks
 pnpm dev:bazaar         # Bazaar discovery extension
 pnpm dev:gas-extensions # exact + upto with EIP-2612 and ERC-20 approval gas sponsoring
 ```
+
+#### Aptos Testnet
+
+For testing on Aptos testnet, you can obtain test tokens from these faucets:
+
+- **Test APT**: https://aptos.dev/network/faucet or through an account on [geomi.dev](https://geomi.dev/manage/faucet)
+- **Test USDC**: https://faucet.circle.com/
+
+#### Casper Testnet
+
+Create or reuse a dedicated Casper testnet account or wallet key, then fund any
+account that submits Casper transactions with testnet CSPR from the
+[CSPR.live testnet faucet](https://testnet.cspr.live/tools/faucet). CSPR is
+required for gas on Casper Testnet.
+
+Use [testnet.cspr.trade](https://testnet.cspr.trade) to get wrapped CSPR (WCSPR) or csprUSD for
+the client payments.
 
 ## Available Examples
 
@@ -92,6 +127,14 @@ Returns payment schemes and networks this facilitator supports.
       "network": "stellar:testnet",
       "extra": {
         "areFeesSponsored": true
+      }
+    },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "xrpl:1",
+      "extra": {
+        "areFeesSponsored": false
       }
     }
   ],
@@ -252,13 +295,26 @@ const facilitator = new x402Facilitator()
 
 Networks use [CAIP-2](https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md) format:
 
+- `aptos:2` — Aptos Testnet
+- `aptos:1` — Aptos Mainnet
+- `casper:casper-test` - Casper Testnet
+- `casper:casper` - Casper Mainnet
 - `eip155:84532` — Base Sepolia
 - `eip155:8453` — Base Mainnet
 - `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` — Solana Devnet
 - `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` — Solana Mainnet
+- `bsv:mainnet` — BSV Mainnet
+- `bsv:testnet` — BSV Testnet
+- `bsv:ttn` — BSV Teranode Test Net (Teratestnet)
+- `bsv:tstn` — BSV Teranode Scaling Test Net
 - `stellar:testnet` — Stellar Testnet
 - `stellar:pubnet` — Stellar Mainnet
 - `hedera:testnet` — Hedera Testnet
 - `hedera:mainnet` — Hedera Mainnet
 - `keeta:1413829460` — Keeta Testnet
 - `keeta:21378` — Keeta Mainnet
+- `cardano:mainnet` — Cardano Mainnet
+- `cardano:preprod` — Cardano Preprod Testnet
+- `cardano:preview` — Cardano Preview Testnet
+- `xrpl:1` — XRPL Testnet
+- `xrpl:0` — XRPL Mainnet

@@ -8,6 +8,7 @@ import { createPaywall } from "@x402/paywall";
 import { evmPaywall } from "@x402/paywall/evm";
 import { svmPaywall } from "@x402/paywall/svm";
 import { avmPaywall } from "@x402/paywall/avm";
+import { SYNC_FACILITATOR_ON_START } from "@/lib/testnetProtectedResources";
 
 const evmPayeeAddress = process.env.RESOURCE_EVM_ADDRESS as `0x${string}`;
 const svmPayeeAddress = process.env.RESOURCE_SVM_ADDRESS as string;
@@ -16,7 +17,7 @@ const facilitatorUrl = process.env.FACILITATOR_URL as string;
 
 const EVM_NETWORK = "eip155:84532" as const; // Base Sepolia
 const SVM_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" as const; // Solana Devnet
-const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=" as const; // Algorand Testnet
+const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe" as const; // Algorand Testnet
 
 // List of blocked countries and regions
 const BLOCKED_COUNTRIES = [
@@ -89,6 +90,7 @@ const x402PaymentProxy = paymentProxyFromConfig(
   ],
   undefined, // paywallConfig
   paywall, // paywall provider
+  SYNC_FACILITATOR_ON_START,
 );
 
 const geolocationProxy = async (req: NextRequest) => {

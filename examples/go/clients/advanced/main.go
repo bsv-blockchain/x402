@@ -21,6 +21,7 @@ import (
  * - error-recovery: Advanced error handling and automatic recovery strategies
  * - multi-network-priority: Network selection with priority and fallback
  * - hooks: Payment lifecycle hooks for custom logic at different stages
+ * - spend-controls: Client-side asset allowlist and USD spend caps
  *
  * Usage:
  *   go run . all-networks
@@ -46,6 +47,7 @@ func main() {
 	// Get configuration
 	evmPrivateKey := os.Getenv("EVM_PRIVATE_KEY")
 	svmPrivateKey := os.Getenv("SVM_PRIVATE_KEY")
+	casperPrivateKey := os.Getenv("CASPER_PRIVATE_KEY")
 
 	// For all-networks, at least one key is required
 	// For other examples, EVM key is required
@@ -54,8 +56,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if pattern == "all-networks" && evmPrivateKey == "" && svmPrivateKey == "" {
-		fmt.Println("❌ At least one of EVM_PRIVATE_KEY or SVM_PRIVATE_KEY is required")
+	if pattern == "all-networks" && evmPrivateKey == "" && svmPrivateKey == "" && casperPrivateKey == "" {
+		fmt.Println("❌ At least one of EVM_PRIVATE_KEY, SVM_PRIVATE_KEY, or CASPER_PRIVATE_KEY is required")
 		os.Exit(1)
 	}
 
@@ -69,7 +71,7 @@ func main() {
 
 	switch pattern {
 	case "all-networks":
-		if err := runAllNetworksExample(ctx, evmPrivateKey, svmPrivateKey, url); err != nil {
+		if err := runAllNetworksExample(ctx, evmPrivateKey, svmPrivateKey, casperPrivateKey, url); err != nil {
 			fmt.Printf("❌ Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -98,9 +100,15 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "spend-controls":
+		if err := runSpendControlsExample(ctx, evmPrivateKey, url); err != nil {
+			fmt.Printf("❌ Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Printf("❌ Unknown pattern: %s\n", pattern)
-		fmt.Println("Available patterns: all-networks, custom-transport, error-recovery, multi-network-priority, hooks")
+		fmt.Println("Available patterns: all-networks, custom-transport, error-recovery, multi-network-priority, hooks, spend-controls")
 		os.Exit(1)
 	}
 }
@@ -123,4 +131,3 @@ func printResponse(resp *http.Response, label string) error {
 func printDuration(start time.Time, label string) {
 	fmt.Printf("⏱️  %s took %v\n\n", label, time.Since(start))
 }
-

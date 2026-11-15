@@ -51,6 +51,8 @@ __all__ = [
     "create_x402_mcp_client_from_config",
     "wrap_mcp_client_with_payment",
     "wrap_mcp_client_with_payment_from_config",
+    "wrap_mcp_client_with_payment_sync",
+    "wrap_mcp_client_with_payment_from_config_sync",
     "x402MCPSession",
     "x402MCPClient",
     "x402MCPClientSync",
@@ -60,6 +62,7 @@ __all__ = [
     "MCP_PAYMENT_META_KEY",
     "MCP_PAYMENT_RESPONSE_META_KEY",
     "PaymentRequiredError",
+    "PaymentResponseError",
     # Utils
     "is_object",
     "create_payment_required_error",
@@ -98,6 +101,13 @@ def __getattr__(name: str):
 
         return getattr(_client, name)
     if name in (
+        "wrap_mcp_client_with_payment_sync",
+        "wrap_mcp_client_with_payment_from_config_sync",
+    ):
+        from . import client as _client
+
+        return getattr(_client, name)
+    if name in (
         "create_x402_mcp_client_from_config",
         "wrap_mcp_client_with_payment",
         "wrap_mcp_client_with_payment_from_config",
@@ -121,6 +131,10 @@ def __getattr__(name: str):
         from .types import PaymentRequiredError
 
         return PaymentRequiredError
+    if name == "PaymentResponseError":
+        from .types import PaymentResponseError
+
+        return PaymentResponseError
     if name in (
         "is_object",
         "create_payment_required_error",

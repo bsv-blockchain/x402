@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { DEFAULT_ASSETS } from "../../src/defaultAssets";
 import { ExactEvmScheme } from "../../src/exact/server/scheme";
+import { registerExactEvmScheme } from "../../src/exact/server/register";
+import { convertToTokenAmount } from "@x402/core/utils";
+import { x402ResourceServer } from "@x402/core/server";
 
 describe("ExactEvmScheme (Server)", () => {
   const server = new ExactEvmScheme();
@@ -7,25 +11,26 @@ describe("ExactEvmScheme (Server)", () => {
   describe("parsePrice", () => {
     describe("Base Sepolia network", () => {
       const network = "eip155:84532";
+      const asset = DEFAULT_ASSETS[network]![0]!;
 
       it("should parse dollar string prices", async () => {
         const result = await server.parsePrice("$0.10", network);
         expect(result.amount).toBe("100000"); // 0.10 USDC = 100000 smallest units
-        expect(result.asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
-        expect(result.extra).toEqual({ name: "USDC", version: "2" });
+        expect(result.asset).toBe(asset.asset);
+        expect(result.extra).toEqual({ name: asset.name, version: asset.version });
         expect(result.extra).not.toHaveProperty("assetTransferMethod");
       });
 
       it("should parse simple number string prices", async () => {
         const result = await server.parsePrice("0.10", network);
         expect(result.amount).toBe("100000");
-        expect(result.asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
+        expect(result.asset).toBe(asset.asset);
       });
 
       it("should parse number prices", async () => {
         const result = await server.parsePrice(0.1, network);
         expect(result.amount).toBe("100000");
-        expect(result.asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
+        expect(result.asset).toBe(asset.asset);
       });
 
       it("should handle larger amounts", async () => {
@@ -46,27 +51,29 @@ describe("ExactEvmScheme (Server)", () => {
 
     describe("Base mainnet network", () => {
       const network = "eip155:8453";
+      const asset = DEFAULT_ASSETS[network]![0]!;
 
-      it("should use Base mainnet USDC address", async () => {
+      it("should resolve the network default asset", async () => {
         const result = await server.parsePrice("1.00", network);
-        expect(result.asset).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+        expect(result.asset).toBe(asset.asset);
         expect(result.amount).toBe("1000000");
-        expect(result.extra).toEqual({ name: "USD Coin", version: "2" });
+        expect(result.extra).toEqual({ name: asset.name, version: asset.version });
         expect(result.extra).not.toHaveProperty("assetTransferMethod");
       });
     });
 
     describe("MegaETH network", () => {
       const network = "eip155:4326";
+      const asset = DEFAULT_ASSETS[network]![0]!;
 
       it("should parse dollar string and include assetTransferMethod permit2", async () => {
         const result = await server.parsePrice("$0.10", network);
-        expect(result.asset).toBe("0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7");
+        expect(result.asset).toBe(asset.asset);
         expect(result.amount).toBe("100000000000000000"); // 0.10 * 10^18
         expect(result.extra).toEqual({
-          name: "MegaUSD",
-          version: "1",
-          assetTransferMethod: "permit2",
+          name: asset.name,
+          version: asset.version,
+          assetTransferMethod: asset.assetTransferMethod,
         });
       });
 
@@ -74,6 +81,29 @@ describe("ExactEvmScheme (Server)", () => {
         const result = await server.parsePrice("1.00", network);
         expect(result.amount).toBe("1000000000000000000"); // 1.00 * 10^18
         expect(result.extra).toHaveProperty("assetTransferMethod", "permit2");
+      });
+    });
+
+    describe("Hemi network", () => {
+      const network = "eip155:43111";
+
+      it("should use Hemi mainnet USDC.e with its EIP-712 domain", async () => {
+        const result = await server.parsePrice("$0.001", network);
+        expect(result.asset).toBe("0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA");
+        expect(result.amount).toBe("1000");
+        expect(result.extra).toEqual({ name: "Bridged USDC (Stargate)", version: "2" });
+        expect(result.extra).not.toHaveProperty("assetTransferMethod");
+      });
+    });
+
+    describe("Hemi testnet network", () => {
+      const network = "eip155:743111";
+
+      it("should use Permit2 and omit the EIP-712 domain for a token without EIP-2612", async () => {
+        const result = await server.parsePrice("$0.001", network);
+        expect(result.asset).toBe("0xD47971C7F5B1067d25cd45d30b2c9eb60de96443");
+        expect(result.amount).toBe("1000");
+        expect(result.extra).toEqual({ assetTransferMethod: "permit2" });
       });
     });
 
@@ -139,9 +169,9 @@ describe("ExactEvmScheme (Server)", () => {
 
         // Register a custom parser for a token that requires Permit2
         customServer.registerMoneyParser(async (amount, network) => {
-          if (network === "eip155:84532" && amount > 0) {
+          if (network === "eip155:84532" && Number(amount) > 0) {
             return {
-              amount: (amount * 1e18).toString(),
+              amount: convertToTokenAmount(String(amount), 18),
               asset: "0xPermit2OnlyToken123456789012345678901234",
               extra: {
                 assetTransferMethod: "permit2",
@@ -166,7 +196,7 @@ describe("ExactEvmScheme (Server)", () => {
           if (network === "eip155:42161") {
             // Only Arbitrum
             return {
-              amount: (amount * 1e18).toString(),
+              amount: convertToTokenAmount(String(amount), 18),
               asset: "0xArbitrumToken",
               extra: { assetTransferMethod: "permit2" },
             };
@@ -177,8 +207,9 @@ describe("ExactEvmScheme (Server)", () => {
         // Should use default USDC for Base Sepolia
         const result = await customServer.parsePrice("1.00", "eip155:84532");
 
-        expect(result.asset).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
-        expect(result.extra).toEqual({ name: "USDC", version: "2" });
+        const sepolia = DEFAULT_ASSETS["eip155:84532"]![0]!;
+        expect(result.asset).toBe(sepolia.asset);
+        expect(result.extra).toEqual({ name: sepolia.name, version: sepolia.version });
       });
     });
 
@@ -199,6 +230,16 @@ describe("ExactEvmScheme (Server)", () => {
         await expect(async () => await server.parsePrice("abc", "eip155:84532")).rejects.toThrow(
           "Invalid money format",
         );
+      });
+    });
+  });
+
+  describe("paymentFlows", () => {
+    it("declares authorization and upfront with authorization as the default", () => {
+      expect(server.defaultAssetTransferMethod).toBe("eip3009");
+      expect(server.paymentFlows).toEqual({
+        eip3009: { supported: ["authorization", "upfront"], default: "authorization" },
+        permit2: { supported: ["authorization", "upfront"], default: "authorization" },
       });
     });
   });
@@ -227,5 +268,22 @@ describe("ExactEvmScheme (Server)", () => {
 
       expect(result).toEqual(requirements);
     });
+  });
+});
+
+describe("registerExactEvmScheme (server)", () => {
+  it("registers the exact scheme on eip155:* when networks are omitted", () => {
+    const server = new x402ResourceServer();
+    registerExactEvmScheme(server);
+    expect(server.hasRegisteredScheme("eip155:*", "exact")).toBe(true);
+    expect(server.getRegisteredScheme("eip155:*", "exact")?.scheme).toBe("exact");
+    expect(server.hasRegisteredScheme("eip155:84532", "exact")).toBe(true);
+  });
+
+  it("registers only the requested networks when a list is provided", () => {
+    const server = new x402ResourceServer();
+    registerExactEvmScheme(server, { networks: ["eip155:8453"] });
+    expect(server.hasRegisteredScheme("eip155:8453", "exact")).toBe(true);
+    expect(server.hasRegisteredScheme("eip155:*", "exact")).toBe(false);
   });
 });

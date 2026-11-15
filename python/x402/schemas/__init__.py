@@ -33,6 +33,8 @@ from .config import (
 
 # Error types
 from .errors import (
+    AfterSettleAbortError,
+    FacilitatorCapabilityError,
     NoMatchingRequirementsError,
     PaymentAbortedError,
     PaymentError,
@@ -46,12 +48,16 @@ from .extensions import ResourceServerExtension
 
 # Helper utilities
 from .helpers import (
+    convert_to_token_amount,
     derive_network_pattern,
     detect_version,
     find_schemes_by_network,
     get_scheme_and_network,
     match_payload_to_requirements,
     matches_network_pattern,
+    number_to_decimal_string,
+    parse_money,
+    parse_money_string,
     parse_payment_payload,
     parse_payment_required,
     parse_payment_requirements,
@@ -61,6 +67,7 @@ from .helpers import (
 from .hooks import (
     AbortProtectedRequestResult,
     AbortResult,
+    CompletedSettlement,
     GrantAccessResult,
     PaymentCancellationDispatcher,
     PaymentCreatedContext,
@@ -78,6 +85,7 @@ from .hooks import (
     ServerPaymentRequiredContext,
     SettleContext,
     SettleFailureContext,
+    SettlePhase,
     SettleResultContext,
     SkipHandlerDirective,
     SkipHandlerResult,
@@ -164,6 +172,10 @@ __all__ = [
     "parse_payment_payload",
     "parse_payment_requirements",
     "matches_network_pattern",
+    "parse_money",
+    "parse_money_string",
+    "convert_to_token_amount",
+    "number_to_decimal_string",
     "derive_network_pattern",
     "find_schemes_by_network",
     # Hooks
@@ -179,6 +191,8 @@ __all__ = [
     "VerifiedPaymentCancelOptions",
     "VerifiedPaymentCanceledContext",
     "VerifiedPaymentCancellationReason",
+    "SettlePhase",
+    "CompletedSettlement",
     "PaymentCancellationDispatcher",
     "GrantAccessResult",
     "AbortProtectedRequestResult",
@@ -203,5 +217,7 @@ __all__ = [
     "SettleError",
     "SchemeNotFoundError",
     "NoMatchingRequirementsError",
+    "AfterSettleAbortError",
     "PaymentAbortedError",
+    "FacilitatorCapabilityError",
 ]

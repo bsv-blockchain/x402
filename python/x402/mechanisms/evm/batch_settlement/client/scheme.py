@@ -11,13 +11,16 @@ except ImportError as e:
         "EVM mechanism requires ethereum packages. Install with: pip install x402[evm]"
     ) from e
 
+from .....interfaces import PaymentPayloadContext
 from .....schemas import PaymentRequired, PaymentRequirements, SettleResponse
 from ....evm.constants import ERC20_ALLOWANCE_ABI, PERMIT2_ADDRESS
 from ....evm.signer import (
     ClientEvmSigner,
     ClientEvmSignerWithReadContract,
     ClientEvmSignerWithSignTransaction,
+    warn_cannot_read_for_sponsoring,
 )
+from ...default_assets import find_default_asset
 from ...utils import get_evm_chain_id, normalize_address
 from ..constants import SCHEME_BATCH_SETTLEMENT
 from ..types import ChannelConfig, VoucherPayload
@@ -25,19 +28,21 @@ from ..utils import compute_channel_id
 from .channel import (
     BatchSettlementClientDeps,
     build_channel_config,
-    process_settle_response,
     recover_channel,
 )
 from .config import (
     BatchSettlementDepositPolicy,
     BatchSettlementDepositStrategyContext,
     BatchSettlementEvmSchemeOptions,
+    apply_max_deposit,
     deposit_amount_for_request,
+    max_deposit_from_spend_cap,
     normalize_strategy_deposit_amount,
     resolve_client_options,
     validate_deposit_policy,
 )
 from .eip3009 import create_batch_settlement_eip3009_deposit_payload
+from .hooks import create_batch_settlement_client_hooks
 from .permit2 import create_batch_settlement_permit2_deposit_payload
 from .recovery import process_corrective_payment_required
 from .refund import RefundOptions, refund_channel
@@ -46,11 +51,11 @@ from .voucher import sign_voucher
 
 
 def _wrap_if_local_account(signer: Any) -> ClientEvmSigner:
-    """Auto-wrap an `eth_account` LocalAccount in `EthAccountSigner`."""
+    """Auto-wrap an eth_account-compatible signer (any `BaseAccount`) in `EthAccountSigner`."""
     try:
-        from eth_account.signers.local import LocalAccount
+        from eth_account.signers.base import BaseAccount
 
-        if isinstance(signer, LocalAccount):
+        if isinstance(signer, BaseAccount):
             from ....evm.signers import EthAccountSigner
 
             return EthAccountSigner(signer)
@@ -59,44 +64,17 @@ def _wrap_if_local_account(signer: Any) -> ClientEvmSigner:
     return signer
 
 
-class _BatchSettlementSchemeHooks:
-    """Scheme-level hooks for BatchSettlementEvmScheme.
-
-    Wired up as `scheme.scheme_hooks` so the x402 client infrastructure
-    calls `on_payment_response` after every paid HTTP request.
-    """
-
-    def __init__(self, scheme: BatchSettlementEvmScheme) -> None:
-        self._scheme = scheme
-
-    def on_payment_response(self, ctx: Any) -> Any:
-        """Update local channel storage after a paid request or corrective 402."""
-        from .....schemas import RecoveredResponseResult
-
-        if ctx.settle_response is not None:
-            process_settle_response(self._scheme._storage, ctx.settle_response)
-            return None
-
-        if ctx.payment_required is not None:
-            deps = self._scheme._deps()
-            recovered = process_corrective_payment_required(deps, ctx.payment_required)
-            if recovered:
-                return RecoveredResponseResult()
-
-        return None
-
-
 class BatchSettlementEvmScheme:
     """Client-side implementation of the `batch-settlement` scheme for EVM.
 
-    Builds payment payloads (deposit + voucher or voucher-only), processes
-    server responses to update local session state via `process_settle_response`,
-    handles corrective 402 resynchronisation via
-    `process_corrective_payment_required`, and supports on-demand cooperative
-    refund requests via `refund`.
+    Builds payment payloads (deposit + voucher or voucher-only), updates local
+    channel state from payment-response hooks, handles corrective 402
+    resynchronisation via `process_corrective_payment_required`, and supports
+    on-demand cooperative refund requests via `refund`.
     """
 
     scheme = SCHEME_BATCH_SETTLEMENT
+    find_default_asset = staticmethod(find_default_asset)
 
     def __init__(
         self,
@@ -122,7 +100,7 @@ class BatchSettlementEvmScheme:
             raise ValueError("payer_authorizer address must match voucher_signer.address")
 
         validate_deposit_policy(self._deposit_policy)
-        self.scheme_hooks = _BatchSettlementSchemeHooks(self)
+        self.scheme_hooks = create_batch_settlement_client_hooks(self._deps())
         self._url_channel_map: dict[str, str] = {}
 
     # ------------------------------------------------------------------ API
@@ -131,8 +109,21 @@ class BatchSettlementEvmScheme:
         self,
         requirements: PaymentRequirements,
         extensions: dict[str, Any] | None = None,
+        context: PaymentPayloadContext | None = None,
     ) -> dict[str, Any]:
-        """Create the inner payment payload dict for a batch-settlement request."""
+        """Create the inner payment payload dict for a batch-settlement request.
+
+        Args:
+            requirements: Server payment requirements (scheme, network, asset, amount).
+            extensions: Server-declared extensions from PaymentRequired.
+            context: Optional extensions and the resolved atomic spend cap.
+        """
+        if context is not None:
+            if context.extensions is not None:
+                extensions = context.extensions
+            max_amount_per_payment = context.max_amount_per_payment
+        else:
+            max_amount_per_payment = None
         deps = self._deps()
         config = build_channel_config(deps, requirements)
         channel_id = compute_channel_id(config, str(requirements.network))
@@ -157,8 +148,20 @@ class BatchSettlementEvmScheme:
         needs_top_up = not needs_initial_deposit and int(max_claimable_amount) > current_balance
 
         if needs_initial_deposit or needs_top_up:
-            computed_deposit = deposit_amount_for_request(self._deposit_policy, request_amount)
-            minimum_deposit_amount = str(int(max_claimable_amount) - current_balance)
+            minimum_deposit_amount = int(max_claimable_amount) - current_balance
+            multiplier = (
+                self._deposit_policy.deposit_multiplier
+                if (self._deposit_policy and self._deposit_policy.deposit_multiplier)
+                else 5
+            )
+            max_deposit = max_deposit_from_spend_cap(max_amount_per_payment, multiplier)
+            computed_deposit = deposit_amount_for_request(
+                self._deposit_policy,
+                request_amount,
+                minimum_deposit_amount,
+                requirements.extra,
+                max_deposit,
+            )
             deposit_amount = self._resolve_deposit_amount(
                 BatchSettlementDepositStrategyContext(
                     payment_requirements=requirements,
@@ -168,8 +171,9 @@ class BatchSettlementEvmScheme:
                     request_amount=str(request_amount),
                     max_claimable_amount=max_claimable_amount,
                     current_balance=str(current_balance),
-                    minimum_deposit_amount=minimum_deposit_amount,
+                    minimum_deposit_amount=str(minimum_deposit_amount),
                     deposit_amount=computed_deposit,
+                    max_deposit=None if max_deposit is None else str(max_deposit),
                 )
             )
             if deposit_amount is None:
@@ -219,10 +223,6 @@ class BatchSettlementEvmScheme:
         """Send a cooperative refund request for the channel backing `url`."""
         return refund_channel(self._deps(), url, options, _url_cache=self._url_channel_map)
 
-    def process_settle_response(self, settle: SettleResponse) -> None:
-        """Update local channel state from a server settle response."""
-        process_settle_response(self._storage, settle)
-
     def process_corrective_payment_required(self, payment_required: PaymentRequired) -> bool:
         """Resync local channel state from a corrective 402 response."""
         return process_corrective_payment_required(self._deps(), payment_required)
@@ -251,7 +251,11 @@ class BatchSettlementEvmScheme:
                 f"deposit_strategy returned {deposit_amount}, below required top-up "
                 f"{context.minimum_deposit_amount}"
             )
-        return deposit_amount
+        return apply_max_deposit(
+            int(deposit_amount),
+            int(context.minimum_deposit_amount),
+            None if context.max_deposit is None else int(context.max_deposit),
+        )
 
     def _create_voucher_payload(
         self,
@@ -291,6 +295,7 @@ class BatchSettlementEvmScheme:
         if EIP2612_GAS_SPONSORING_KEY not in extensions:
             return None
         if not isinstance(self._signer, ClientEvmSignerWithReadContract):
+            warn_cannot_read_for_sponsoring(str(requirements.network))
             return None
 
         extra = requirements.extra or {}
@@ -350,6 +355,9 @@ class BatchSettlementEvmScheme:
         )
 
         if ERC20_APPROVAL_GAS_SPONSORING_KEY not in extensions:
+            return None
+        if not isinstance(self._signer, ClientEvmSignerWithReadContract):
+            warn_cannot_read_for_sponsoring(str(requirements.network))
             return None
         if not isinstance(self._signer, ClientEvmSignerWithSignTransaction):
             return None

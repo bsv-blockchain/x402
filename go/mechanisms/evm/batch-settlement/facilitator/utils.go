@@ -17,6 +17,15 @@ import (
 
 var zeroAddress = "0x0000000000000000000000000000000000000000"
 
+// channelStatePollDeadline / channelStatePollInterval bound the post-transaction
+// polling loops in refund.go and deposit.go, which re-read onchain channel state
+// until it reflects a just-confirmed change (e.g. a pending-withdrawal cancellation
+// or a deposit balance increase). Shared so both call sites stay in lockstep.
+const (
+	channelStatePollDeadline = 2 * time.Second
+	channelStatePollInterval = 150 * time.Millisecond
+)
+
 // ContractChannelConfigTuple is the concrete struct shape passed to BatchSettlement
 // contract calls (deposit, refund, claim). Field names and ordering match the
 // Solidity ChannelConfig struct so go-ethereum's ABI packer can map them by reflection.
@@ -120,6 +129,22 @@ func ReadChannelState(
 	}
 
 	return state, nil
+}
+
+// parseRequirementsAmount parses the server-supplied requirements.Amount as a non-negative
+// base-10 integer. The amount comes from the resource server, so the facilitator must not trust
+// it: signs, whitespace, and other non-digit forms are rejected (a negative value would lower
+// the minimum-advance floor).
+func parseRequirementsAmount(amount string) (*big.Int, bool) {
+	if amount == "" {
+		return nil, false
+	}
+	for i := 0; i < len(amount); i++ {
+		if amount[i] < '0' || amount[i] > '9' {
+			return nil, false
+		}
+	}
+	return new(big.Int).SetString(amount, 10)
 }
 
 // ValidateChannelConfig validates a ChannelConfig against payment requirements.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from .....schemas import VerifyResponse
@@ -13,7 +14,9 @@ from ..errors import (
     ERR_CUMULATIVE_AMOUNT_BELOW_CLAIMED,
     ERR_CUMULATIVE_AMOUNT_MISMATCH,
     ERR_CUMULATIVE_EXCEEDS_BALANCE,
+    ERR_DEPOSIT_BELOW_MIN_DEPOSIT,
     ERR_INVALID_VOUCHER_SIGNATURE,
+    ERR_VERIFICATION_STATE_UNAVAILABLE,
 )
 from ..facilitator.utils import validate_channel_config, verify_batch_settlement_voucher_typed_data
 from ..types import (
@@ -21,6 +24,7 @@ from ..types import (
     is_refund_payload,
     is_voucher_payload,
 )
+from ..utils import channel_id_binding_error, normalize_channel_id
 from .storage import Channel, PendingRequest
 from .utils import read_extra_number, read_extra_string
 
@@ -28,6 +32,7 @@ if TYPE_CHECKING:
     from .....interfaces import SchemePaymentRequiredContext
     from .....schemas import PaymentRequirements
     from .....schemas.hooks import (
+        AbortResult,
         SkipHandlerResult,
         VerifiedPaymentCanceledContext,
         VerifyContext,
@@ -40,6 +45,10 @@ if TYPE_CHECKING:
 # This bounded TTL releases channels when cleanup cannot run or complete.
 _MIN_PENDING_TTL_MS = 5_000
 _MAX_PENDING_TTL_MS = 10 * 60 * 1000
+
+# Largest integer a JSON number can carry losslessly (2^53 - 1); bounds the numeric fallback when
+# reading facilitator-reported uint values so every SDK applies the same rule.
+_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 def _now_ms() -> int:
@@ -56,32 +65,59 @@ def _is_pending_live(pending: PendingRequest | None, now_ms: int) -> bool:
     return pending is not None and pending.expires_at > now_ms
 
 
-def _infer_missing_local_charged_amount(
-    signed_max_claimable: str, price: str, is_paid_payload: bool
-) -> str:
-    if not is_paid_payload:
-        return signed_max_claimable
-    signed = int(signed_max_claimable)
-    amount = int(price)
-    if signed < amount:
-        return "0"
-    return str(signed - amount)
+def _verification_state_unavailable() -> AbortResult:
+    from .....schemas.hooks import AbortResult
+
+    return AbortResult(
+        reason=ERR_VERIFICATION_STATE_UNAVAILABLE,
+        message="Unable to establish channel verification state",
+    )
 
 
-def _build_provisional_channel(raw: dict, charged_cumulative_amount: str) -> Channel:
+def _read_required_uint_extra(extra: dict, key: str) -> str | None:
+    """Strictly read a non-negative integer (as a decimal string) from facilitator ``extra``.
+
+    Canonical rule shared across SDKs: a plain decimal string with no leading zeros (``"0"`` is
+    the only string starting with ``0``), or a JSON number that is a non-negative safe integer.
+    """
+    value = extra.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if 0 <= value <= _MAX_SAFE_INTEGER else None
+    if (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdigit()
+        and (value == "0" or not value.startswith("0"))
+    ):
+        return value
+    return None
+
+
+def _build_provisional_channel(
+    raw: dict,
+    charged_cumulative_amount: str,
+    network: str,
+    balance: str = "0",
+    total_claimed: str = "0",
+    withdraw_requested_at: int = 0,
+    refund_nonce: int = 0,
+) -> Channel:
     from ..types import ChannelConfig
 
     voucher = raw["voucher"]
     return Channel(
         channel_id=voucher["channelId"],
         channel_config=ChannelConfig.from_dict(raw["channelConfig"]),
+        network=network or None,
         charged_cumulative_amount=charged_cumulative_amount,
         signed_max_claimable=str(voucher["maxClaimableAmount"]),
         signature=voucher.get("signature", "0x"),
-        balance="0",
-        total_claimed="0",
-        withdraw_requested_at=0,
-        refund_nonce=0,
+        balance=balance,
+        total_claimed=total_claimed,
+        withdraw_requested_at=withdraw_requested_at,
+        refund_nonce=refund_nonce,
         last_request_timestamp=_now_ms(),
     )
 
@@ -165,8 +201,10 @@ def _verify_voucher_locally(
 
 
 def handle_before_verify(scheme: BatchSettlementEvmScheme, ctx: VerifyContext):
-    """Reserve the channel for an in-flight verify, or abort on mismatch / busy."""
-    from .....schemas.hooks import AbortResult
+    """Bind channelId and read a snapshot. Performs no storage mutation."""
+    from .....schemas.hooks import AbortResult, SkipVerifyResult
+    from ..types import ChannelConfig
+    from .scheme import BatchSettlementRequestContext
 
     payment_payload = ctx.payment_payload
     requirements = ctx.requirements
@@ -177,74 +215,52 @@ def handle_before_verify(scheme: BatchSettlementEvmScheme, ctx: VerifyContext):
     if not is_paid_payload and not is_zero_charge_payload:
         return None
 
-    voucher = raw["voucher"]
-    channel_id = voucher["channelId"]
-    now = _now_ms()
-    pending_id = create_nonce()
-
-    # `outcome` is set inside the update callback so we know what happened.
-    outcome: dict = {}
-
-    def update(current: Channel | None) -> Channel | None:
-        if _is_pending_live(current.pending_request if current else None, now):
-            outcome["status"] = "busy"
-            return current
-
-        charged_cumulative_amount = (
-            current.charged_cumulative_amount
-            if current
-            else _infer_missing_local_charged_amount(
-                str(voucher["maxClaimableAmount"]),
-                requirements.amount,
-                is_paid_payload,
+    if scheme.get_enforce_min_deposit() and is_deposit_payload(raw):
+        min_deposit = int(scheme.resolve_min_deposit_hint(requirements))
+        if int(raw["deposit"]["amount"]) < min_deposit:
+            return AbortResult(
+                reason=ERR_DEPOSIT_BELOW_MIN_DEPOSIT,
+                message="Deposit amount is below the server minimum",
             )
+
+    try:
+        voucher = raw["voucher"]
+        claimed_channel_id = str(voucher["channelId"])
+        channel_config = ChannelConfig.from_dict(raw["channelConfig"])
+
+        bind_err = channel_id_binding_error(
+            channel_config, claimed_channel_id, requirements.network
         )
+        if bind_err:
+            return AbortResult(
+                reason=bind_err,
+                message="Channel id does not match channel config",
+            )
 
-        if is_zero_charge_payload:
-            expected = int(charged_cumulative_amount)
-        else:
-            expected = int(charged_cumulative_amount) + int(requirements.amount)
+        channel_id = normalize_channel_id(claimed_channel_id)
+        now = _now_ms()
+        pending_id = create_nonce()
 
-        if int(voucher["maxClaimableAmount"]) != expected:
-            if current:
-                outcome["status"] = "mismatch"
-                outcome["channel"] = current
+        channel_snapshot = scheme.get_storage().get(channel_id)
+        if channel_snapshot is not None and requirements.network:
+            channel_snapshot = replace(channel_snapshot, network=requirements.network)
+
+        # Without a local record the baseline is the facilitator-verified onchain totalClaimed,
+        # which is only known after verify; the cumulative check then runs in handle_after_verify.
+        if channel_snapshot is not None:
+            charged_cumulative_amount = channel_snapshot.charged_cumulative_amount
+            if is_zero_charge_payload:
+                expected = int(charged_cumulative_amount)
             else:
-                outcome["status"] = "mismatch"
-                outcome["channel"] = _build_provisional_channel(raw, charged_cumulative_amount)
-            return current
+                expected = int(charged_cumulative_amount) + int(requirements.amount)
 
-        outcome["status"] = "reserved"
-        outcome["channel_snapshot"] = current
+            if int(voucher["maxClaimableAmount"]) != expected:
+                scheme.remember_channel_snapshot(payment_payload, channel_snapshot)
+                return AbortResult(
+                    reason=ERR_CUMULATIVE_AMOUNT_MISMATCH,
+                    message="Client voucher base does not match server state",
+                )
 
-        next_ch = (
-            current.copy()
-            if current
-            else _build_provisional_channel(raw, charged_cumulative_amount)
-        )
-        next_ch.pending_request = PendingRequest(
-            pending_id=pending_id,
-            signed_max_claimable=str(voucher["maxClaimableAmount"]),
-            expires_at=_pending_expires_at(requirements.max_timeout_seconds, now),
-        )
-        next_ch.last_request_timestamp = now
-        return next_ch
-
-    scheme.get_storage().update_channel(channel_id, update)
-
-    status = outcome.get("status")
-    if status == "busy":
-        return AbortResult(reason=ERR_CHANNEL_BUSY)
-
-    if status == "mismatch":
-        scheme.remember_channel_snapshot(payment_payload, outcome["channel"])
-        return AbortResult(reason=ERR_CUMULATIVE_AMOUNT_MISMATCH)
-
-    if status == "reserved":
-        from .....schemas.hooks import SkipVerifyResult
-        from .scheme import BatchSettlementRequestContext
-
-        channel_snapshot = outcome.get("channel_snapshot")
         local_result = (
             _verify_voucher_locally(scheme, raw, requirements, channel_snapshot, now)
             if is_voucher_payload(raw)
@@ -261,22 +277,25 @@ def handle_before_verify(scheme: BatchSettlementEvmScheme, ctx: VerifyContext):
         )
         if local_result is not None:
             return SkipVerifyResult(result=local_result)
+    except Exception:
+        return _verification_state_unavailable()
 
     return None
 
 
 def handle_after_verify(
     scheme: BatchSettlementEvmScheme, ctx: VerifyResultContext
-) -> SkipHandlerResult | None:
-    """Persist channel state after facilitator verify; emit skipHandler for refunds."""
-    from .....schemas.hooks import SkipHandlerDirective, SkipHandlerResult
+) -> AbortResult | SkipHandlerResult | None:
+    """Atomically reserve + persist after successful verify; abort on busy/stale."""
+    from .....schemas.hooks import AbortResult, SkipHandlerDirective, SkipHandlerResult
     from ..types import ChannelConfig
+    from .scheme import BatchSettlementRequestContext
 
     payment_payload = ctx.payment_payload
+    requirements = ctx.requirements
     result = ctx.result
 
     if not result.is_valid or not result.payer:
-        scheme.clear_pending_request(payment_payload)
         return None
 
     raw = payment_payload.payload
@@ -287,47 +306,103 @@ def handle_after_verify(
     channel_config_dict = raw["channelConfig"]
 
     voucher = raw["voucher"]
-    channel_id = voucher["channelId"]
+    try:
+        channel_id = normalize_channel_id(str(voucher["channelId"]))
+    except ValueError:
+        return _verification_state_unavailable()
+
     signed_max_claimable = str(voucher["maxClaimableAmount"])
     signature = voucher.get("signature", "0x")
     channel_config = ChannelConfig.from_dict(channel_config_dict)
 
     extra = result.extra or {}
     balance = read_extra_string(extra, "balance", "0")
-    total_claimed = read_extra_string(extra, "totalClaimed", "0")
+    onchain_total_claimed = _read_required_uint_extra(extra, "totalClaimed")
+    if onchain_total_claimed is None:
+        return _verification_state_unavailable()
+    total_claimed = onchain_total_claimed
     withdraw_requested_at = read_extra_number(extra, "withdrawRequestedAt", 0)
     refund_nonce = read_extra_number(extra, "refundNonce", 0)
     now = _now_ms()
 
     request_context = scheme.read_request_context(payment_payload)
     if request_context is None or not request_context.pending_id:
-        return None
-    if request_context.local_verify and is_voucher_payload(raw):
-        return None
+        return _verification_state_unavailable()
+    pending_id = request_context.pending_id
+    local_verify = request_context.local_verify
+
+    outcome: dict = {}
 
     def update(current: Channel | None) -> Channel | None:
-        if current is None:
+        if _is_pending_live(current.pending_request if current else None, now):
+            outcome["status"] = "busy"
             return current
-        if (
-            current.pending_request is None
-            or current.pending_request.pending_id != request_context.pending_id
-        ):
-            return current
-        next_ch = current.copy()
-        next_ch.channel_config = channel_config
-        next_ch.signed_max_claimable = signed_max_claimable
-        next_ch.signature = signature
-        next_ch.balance = balance
-        next_ch.total_claimed = total_claimed
-        next_ch.withdraw_requested_at = withdraw_requested_at
-        next_ch.refund_nonce = refund_nonce
-        if not request_context.local_verify:
-            next_ch.onchain_synced_at = now
-        next_ch.last_request_timestamp = now
-        return next_ch
 
-    update_result = scheme.get_storage().update_channel(channel_id, update)
+        base = current.charged_cumulative_amount if current else onchain_total_claimed
+        expected = int(base) if is_refund_voucher else int(base) + int(requirements.amount)
+        if int(signed_max_claimable) != expected:
+            outcome["status"] = "stale"
+            outcome["channel"] = (
+                current
+                if current
+                else _build_provisional_channel(
+                    raw,
+                    base,
+                    requirements.network,
+                    balance,
+                    total_claimed,
+                    withdraw_requested_at,
+                    refund_nonce,
+                )
+            )
+            return current
+
+        outcome["status"] = "reserved"
+        channel = Channel(
+            channel_id=channel_id,
+            channel_config=channel_config,
+            network=requirements.network or (current.network if current else None),
+            charged_cumulative_amount=base,
+            signed_max_claimable=signed_max_claimable,
+            signature=signature,
+            balance=balance,
+            total_claimed=total_claimed,
+            withdraw_requested_at=withdraw_requested_at,
+            refund_nonce=refund_nonce,
+            onchain_synced_at=(current.onchain_synced_at if local_verify and current else now),
+            last_request_timestamp=now,
+            pending_request=PendingRequest(
+                pending_id=pending_id,
+                signed_max_claimable=signed_max_claimable,
+                expires_at=_pending_expires_at(requirements.max_timeout_seconds, now),
+            ),
+        )
+        return channel
+
+    try:
+        update_result = scheme.get_storage().update_channel(channel_id, update)
+    except Exception:
+        return _verification_state_unavailable()
+
+    status = outcome.get("status")
+    if status == "busy":
+        return AbortResult(
+            reason=ERR_CHANNEL_BUSY,
+            message="Channel is already processing a request",
+        )
+
+    if status == "stale":
+        scheme.remember_channel_snapshot(payment_payload, outcome["channel"])
+        return AbortResult(
+            reason=ERR_CUMULATIVE_AMOUNT_MISMATCH,
+            message="Client voucher base does not match server state",
+        )
+
     if update_result.status == "updated" and update_result.channel is not None:
+        scheme.merge_request_context(
+            payment_payload,
+            BatchSettlementRequestContext(reservation_committed=True),
+        )
         scheme.remember_channel_snapshot(payment_payload, update_result.channel)
 
     if is_refund_voucher and update_result.status == "updated":
@@ -349,7 +424,12 @@ def handle_verified_payment_canceled(
     ctx: VerifiedPaymentCanceledContext,
 ) -> None:
     """Clear this request's reservation when handler work is canceled."""
-    if ctx.reason not in ("handler_threw", "handler_failed"):
+    if ctx.reason not in (
+        "handler_threw",
+        "handler_failed",
+        "after_verify_aborted",
+        "settlement_preflight_failed",
+    ):
         return
     scheme.clear_pending_request(ctx.payment_payload)
 
@@ -359,6 +439,8 @@ def handle_enrich_payment_required_response(
     ctx: SchemePaymentRequiredContext,
 ) -> list[PaymentRequirements] | None:
     """Embed channel snapshot in corrective 402 responses for cumulative mismatches."""
+    from ..types import ChannelConfig
+
     if ctx.error != ERR_CUMULATIVE_AMOUNT_MISMATCH:
         return None
 
@@ -370,10 +452,22 @@ def handle_enrich_payment_required_response(
     if not (is_voucher_payload(raw) or is_deposit_payload(raw) or is_refund_payload(raw)):
         return None
 
-    channel_id = raw["voucher"]["channelId"]
+    claimed_channel_id = str(raw["voucher"]["channelId"])
+    try:
+        channel_config = ChannelConfig.from_dict(raw["channelConfig"])
+    except Exception:
+        return None
+    if channel_id_binding_error(
+        channel_config, claimed_channel_id, payment_payload.accepted.network
+    ):
+        return None
+
     channel = scheme.take_channel_snapshot(payment_payload)
     if channel is None:
-        channel = scheme.get_storage().get(channel_id)
+        try:
+            channel = scheme.get_storage().get(claimed_channel_id)
+        except ValueError:
+            return None
     if channel is None:
         return None
 

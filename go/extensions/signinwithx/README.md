@@ -22,8 +22,16 @@ It includes:
 storage := signinwithx.NewInMemoryStorage()
 extension := signinwithx.MustCreateResourceServerExtension(signinwithx.ServerOptions{
     Storage: storage,
+    Origin:  "https://api.example.com",
 })
+```
 
+`Origin` must be the public http(s) origin clients use to reach the server.
+Set it to the external origin behind reverse proxies or TLS termination, not the
+internal listener address. Domain and URI fields in SIWX challenges are derived
+from this origin and the request path.
+
+```go
 server := x402http.Newx402HTTPResourceServer(routes)
 server.RegisterExtension(extension)
 ```
@@ -36,6 +44,7 @@ EIP-1271 and counterfactual EIP-6492 verification.
 contractVerifier := siwe.NewEthCallerVerifier(ethClient)
 extension := signinwithx.MustCreateResourceServerExtension(signinwithx.ServerOptions{
     Storage: storage,
+    Origin:  "https://api.example.com",
     VerifyOptions: signinwithx.VerifyOptions{
         EVMContractVerifier: contractVerifier,
     },
@@ -76,4 +85,6 @@ x402Client := x402.Newx402Client().
 ```
 
 The HTTP client first tries to satisfy a `sign-in-with-x` challenge by sending a
-`SIGN-IN-WITH-X` header. If auth fails, the normal x402 payment flow continues.
+`SIGN-IN-WITH-X` header. It verifies the challenge is bound to the 402 response
+origin before signing. If auth fails or the challenge is not origin-bound, the
+normal x402 payment flow continues.

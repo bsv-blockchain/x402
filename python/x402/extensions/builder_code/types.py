@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ...schemas import PaymentPayload, PaymentRequirements
+
 # Extension identifier constant
 BUILDER_CODE = "builder-code"
 
@@ -20,6 +22,27 @@ SCHEMA_2_ID = 0x02
 
 # Pattern for valid builder codes (lowercase alphanumeric + underscore, 1-32 chars)
 BUILDER_CODE_PATTERN = re.compile(r"^[a-z0-9_]{1,32}$")
+
+# Maximum client-provided service codes reserved in the `s` array. Enforced by
+# BuilderCodeClientExtension independently of the server's reservation so one
+# side can never crowd out the other.
+MAX_CLIENT_SERVICE_CODES = 5
+
+# Maximum server-declared service codes reserved in the `s` array. Enforced by
+# declare_builder_code_extension independently of the client's reservation so
+# one side can never crowd out the other.
+MAX_SERVER_SERVICE_CODES = 5
+
+# Maximum facilitator-appended service codes reserved in the `s` array.
+# Enforced by BuilderCodeFacilitatorExtension for its own service_code.
+MAX_FACILITATOR_SERVICE_CODES = 1
+
+# Maximum number of service codes (`s`) encoded onchain at settlement — the
+# sum of each side's dedicated reservation (MAX_CLIENT_SERVICE_CODES,
+# MAX_SERVER_SERVICE_CODES, MAX_FACILITATOR_SERVICE_CODES).
+MAX_SERVICE_CODES = (
+    MAX_CLIENT_SERVICE_CODES + MAX_SERVER_SERVICE_CODES + MAX_FACILITATOR_SERVICE_CODES
+)
 
 
 @dataclass
@@ -39,6 +62,38 @@ class BuilderCodeExtensionData:
     s: str | list[str] | None = None
 
 
+SettlementMetadataValue = (
+    int | str | list["SettlementMetadataValue"] | dict[str, "SettlementMetadataValue"]
+)
+SettlementMetadata = dict[str, SettlementMetadataValue]
+
+
+@dataclass
+class BuilderCodeSuffixData:
+    """Fields present in a settlement calldata suffix.
+
+    ``m`` is not part of ``PaymentRequired`` or ``PaymentPayload``.
+    """
+
+    a: str | None = None
+    w: str | None = None
+    s: str | list[str] | None = None
+    m: SettlementMetadata | None = None
+
+
+@dataclass
+class DataSuffixContext:
+    """Settlement inputs the builder-code facilitator reads when building a suffix.
+
+    ``metadata`` is supplied by the settling mechanism and encoded as ``m``.
+    Any ``m`` on the payment payload is ignored.
+    """
+
+    payload: PaymentPayload
+    requirements: PaymentRequirements
+    metadata: SettlementMetadata | None = None
+
+
 @dataclass
 class BuilderCodeFacilitatorConfig:
     """Configuration for the builder code facilitator extension.
@@ -46,6 +101,10 @@ class BuilderCodeFacilitatorConfig:
     Attributes:
         builder_code: The facilitator's own builder code, set as the ``w`` field at
             settlement when provided.
+        service_code: The facilitator's own service code, appended to the ``s`` field
+            at settlement when provided. Reserved independently of the client/server
+            ``s`` entries (see ``MAX_FACILITATOR_SERVICE_CODES``).
     """
 
     builder_code: str | None = None
+    service_code: str | None = None

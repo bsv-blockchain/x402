@@ -1,20 +1,37 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+
+const mockTransactionApis = vi.hoisted(() => ({
+  verifySignature: vi.fn(),
+  sign: vi.fn(),
+  toJSON: vi.fn(),
+}));
+
+vi.mock("@concordium/web-sdk/transactions", async importOriginal => {
+  const actual = await importOriginal<typeof import("@concordium/web-sdk/transactions")>();
+  return {
+    Transaction: Object.assign({}, actual.Transaction, mockTransactionApis),
+  };
+});
+
 import { ExactConcordiumScheme as ExactConcordiumServer } from "../../src/exact/server/scheme";
 import { ExactConcordiumScheme as ExactConcordiumFacilitator } from "../../src/exact/facilitator/scheme";
 import { ExactConcordiumScheme as ExactConcordiumClient } from "../../src/exact/client/scheme";
+import { ExactConcordiumScheme as ExactConcordiumClientFromIndex } from "../../src/exact/client";
+import { ExactConcordiumScheme as ExactConcordiumFacilitatorFromIndex } from "../../src/exact/facilitator";
+import { ExactConcordiumScheme as ExactConcordiumServerFromIndex } from "../../src/exact/server";
 import {
   CONCORDIUM_MAINNET_CAIP2,
   CONCORDIUM_TESTNET_CAIP2,
-  CONCORDIUM_ADDRESS_REGEX,
-  CCD_DECIMALS,
-  MAX_EXPIRY_OFFSET_SECONDS,
-  DEFAULT_FINALIZATION_TIMEOUT_MS,
+  DEFAULT_ASSETS,
   getConcordiumGrpcUrl,
   parseGrpcUrl,
   getExplorerTxUrl,
 } from "../../src";
 import type { PaymentRequirements } from "@x402/core/types";
 import type { FacilitatorConcordiumSigner } from "../../src";
+import { convertToTokenAmount } from "@x402/core/utils";
+
+const testnetUsdr = DEFAULT_ASSETS[CONCORDIUM_TESTNET_CAIP2]![0]!;
 
 function createMockFacilitatorSigner(
   address = "4FmiTW2L4RvCsSVTjFAavYvrgnPLGNj43eiwPYmbhNqtAcMbWW",
@@ -36,15 +53,9 @@ describe("@x402/concordium", () => {
     it("should export scheme classes", () => {
       expect(ExactConcordiumServer).toBeDefined();
       expect(ExactConcordiumFacilitator).toBeDefined();
-    });
-
-    it("should export constants", () => {
-      expect(CONCORDIUM_MAINNET_CAIP2).toBe("ccd:9dd9ca4d19e9393877d2c44b70f89acb");
-      expect(CONCORDIUM_TESTNET_CAIP2).toBe("ccd:4221332d34e1694168c2a0c0b3fd0f27");
-      expect(CONCORDIUM_ADDRESS_REGEX).toBeDefined();
-      expect(CCD_DECIMALS).toBe(6);
-      expect(MAX_EXPIRY_OFFSET_SECONDS).toBe(600);
-      expect(DEFAULT_FINALIZATION_TIMEOUT_MS).toBe(60_000);
+      expect(ExactConcordiumClientFromIndex).toBe(ExactConcordiumClient);
+      expect(ExactConcordiumFacilitatorFromIndex).toBe(ExactConcordiumFacilitator);
+      expect(ExactConcordiumServerFromIndex).toBe(ExactConcordiumServer);
     });
 
     it("should export utility functions", () => {
@@ -58,6 +69,16 @@ describe("@x402/concordium", () => {
     it("should have scheme property set to exact", () => {
       const server = new ExactConcordiumServer();
       expect(server.scheme).toBe("exact");
+    });
+
+    describe("paymentFlows", () => {
+      it("declares authorization and upfront with authorization as the default", () => {
+        const server = new ExactConcordiumServer();
+        expect(server.defaultAssetTransferMethod).toBe("default");
+        expect(server.paymentFlows).toEqual({
+          default: { supported: ["authorization", "upfront"], default: "authorization" },
+        });
+      });
     });
 
     it("should inject feePayer from supported kind into payment requirements", async () => {
@@ -165,24 +186,26 @@ describe("@x402/concordium", () => {
       ).rejects.toThrow("Asset must be specified");
     });
 
-    it("should throw when raw number has no registered money parser", async () => {
+    it("should parse USD prices to USDR by default", async () => {
       const server = new ExactConcordiumServer();
-      await expect(server.parsePrice("10", CONCORDIUM_TESTNET_CAIP2)).rejects.toThrow(
-        "Cannot resolve price",
-      );
+      const result = await server.parsePrice("$0.001", CONCORDIUM_TESTNET_CAIP2);
+
+      expect(result.amount).toBe("1000");
+      expect(result.asset).toBe(testnetUsdr.asset);
     });
 
-    it("should throw when USD price has no registered money parser", async () => {
+    it("should parse a raw number to USDR by default", async () => {
       const server = new ExactConcordiumServer();
-      await expect(server.parsePrice("$0.001", CONCORDIUM_TESTNET_CAIP2)).rejects.toThrow(
-        "Cannot resolve price",
-      );
+      const result = await server.parsePrice("10", CONCORDIUM_TESTNET_CAIP2);
+
+      expect(result.amount).toBe("10000000");
+      expect(result.asset).toBe(testnetUsdr.asset);
     });
 
     it("should allow USD prices when a money parser is registered", async () => {
       const server = new ExactConcordiumServer();
       server.registerMoneyParser(async amount => ({
-        amount: String(Math.round(amount * 1e6)),
+        amount: convertToTokenAmount(String(amount), 6),
         asset: "EURR",
         extra: {},
       }));
@@ -240,7 +263,7 @@ describe("@x402/concordium", () => {
       });
       server.registerMoneyParser(async amount => {
         callOrder.push(2);
-        return { amount: String(amount * 1e6), asset: "EURR", extra: {} };
+        return { amount: convertToTokenAmount(String(amount), 6), asset: "EURR", extra: {} };
       });
       server.registerMoneyParser(async amount => {
         callOrder.push(3); // should never be called
@@ -252,14 +275,23 @@ describe("@x402/concordium", () => {
       expect(callOrder).toEqual([1, 2]); // third parser never reached
     });
 
-    it("should throw when all money parsers return null", async () => {
+    it("should fall through to USDR when all money parsers return null", async () => {
       const server = new ExactConcordiumServer();
       server.registerMoneyParser(async () => null);
       server.registerMoneyParser(async () => null);
 
-      await expect(server.parsePrice("5", CONCORDIUM_TESTNET_CAIP2)).rejects.toThrow(
-        "Cannot resolve price",
+      const result = await server.parsePrice("5", CONCORDIUM_TESTNET_CAIP2);
+      expect(result.amount).toBe("5000000");
+      expect(result.asset).toBe(testnetUsdr.asset);
+    });
+
+    it("returns configured decimals for USDR and undefined for CCD or EURR", () => {
+      const server = new ExactConcordiumServer();
+      expect(server.getAssetDecimals(testnetUsdr.symbol, CONCORDIUM_TESTNET_CAIP2)).toBe(
+        testnetUsdr.decimals,
       );
+      expect(server.getAssetDecimals("CCD", CONCORDIUM_TESTNET_CAIP2)).toBeUndefined();
+      expect(server.getAssetDecimals("EURR", CONCORDIUM_TESTNET_CAIP2)).toBeUndefined();
     });
 
     it("should preserve extra fields from AssetAmount in parsePrice", async () => {
@@ -1577,6 +1609,327 @@ describe("@x402/concordium", () => {
 
       expect(result).toBe("preflight_insufficient_token_funds");
     });
+
+    describe("settle", () => {
+      const sponsorAddress = "4FmiTW2L4RvCsSVTjFAavYvrgnPLGNj43eiwPYmbhNqtAcMbWW";
+      const payerAddress = "3UrcxPQeYywasrPcYUcqhvFu3SB2vBBDjj7TsaRQ431vGiczYp";
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      function buildSettlePaymentPayload(signedTransaction?: Record<string, unknown>) {
+        return {
+          x402Version: 2,
+          accepted: { scheme: "exact", network: CONCORDIUM_TESTNET_CAIP2 } as any,
+          payload: {
+            signedTransaction: signedTransaction ?? {
+              version: 1,
+              header: {
+                sender: payerAddress,
+                expiry: Math.floor(Date.now() / 1000) + 300,
+                sponsor: { account: sponsorAddress, numSignatures: 1 },
+                numSignatures: 1,
+                nonce: 1,
+              },
+              payload: {
+                type: "transfer",
+                toAddress: sponsorAddress,
+                amount: "1000000",
+              },
+              signatures: { sender: { "0": { "0": "sig" } }, sponsor: {} },
+            },
+          } as any,
+        };
+      }
+
+      function buildSettleRequirements(
+        overrides: Partial<PaymentRequirements> = {},
+      ): PaymentRequirements {
+        return {
+          scheme: "exact",
+          network: CONCORDIUM_TESTNET_CAIP2,
+          amount: "1000000",
+          asset: "CCD",
+          payTo: sponsorAddress,
+          maxTimeoutSeconds: 600,
+          extra: { feePayer: sponsorAddress },
+          ...overrides,
+        };
+      }
+
+      it("should return verification failure when verify rejects the payload", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements({ extra: {} }),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("missing_fee_payer");
+      });
+
+      it("should reject when verify succeeds without a payer address", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({ isValid: true, payer: "" });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("missing_payer");
+      });
+
+      it("should reject invalid transaction format after verification", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          {
+            x402Version: 2,
+            accepted: { scheme: "exact", network: CONCORDIUM_TESTNET_CAIP2 } as any,
+            payload: {} as any,
+          },
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("invalid_transaction_format");
+      });
+
+      it("should reject missing fee payer during settlement", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements({ extra: {} }),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("missing_fee_payer");
+      });
+
+      it("should reject unmanaged fee payer during settlement", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements({
+            extra: { feePayer: "3UrcxPQeYywasrPcYUcqhvFu3SB2vBBDjj7TsaRQ431vGiczYp" },
+          }),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("fee_payer_not_managed_by_facilitator");
+      });
+
+      it("should surface sponsor signing failures", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockRejectedValue(new Error("signing broke"));
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("sponsor_signing_failed: signing broke");
+      });
+
+      it("should surface submission failures", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockRejectedValue(new Error("rpc down"));
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("submission_failed: rpc down");
+      });
+
+      it("should surface finalization failures", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockResolvedValue("tx-hash-123");
+        mockSigner.waitForFinalization.mockRejectedValue(new Error("timeout"));
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.transaction).toBe("tx-hash-123");
+        expect(result.errorReason).toBe("finalization_failed: timeout");
+      });
+
+      it("should reject when finalization is required but status is not finalized", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockResolvedValue("tx-hash-456");
+        mockSigner.waitForFinalization.mockResolvedValue({
+          status: "committed",
+          sender: payerAddress,
+          recipient: sponsorAddress,
+        });
+        const facilitator = new ExactConcordiumFacilitator({
+          signer: mockSigner,
+          requireFinalization: true,
+        });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("finalization_timeout");
+      });
+
+      it("should reject on-chain sender mismatch", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockResolvedValue("tx-hash-789");
+        mockSigner.waitForFinalization.mockResolvedValue({
+          status: "finalized",
+          sender: "wrong-sender",
+          recipient: sponsorAddress,
+        });
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("on_chain_sender_mismatch");
+      });
+
+      it("should reject on-chain recipient mismatch", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockResolvedValue("tx-hash-abc");
+        mockSigner.waitForFinalization.mockResolvedValue({
+          status: "finalized",
+          sender: payerAddress,
+          recipient: "wrong-recipient",
+        });
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.errorReason).toBe("on_chain_recipient_mismatch");
+      });
+
+      it("should settle successfully when verification and chain steps succeed", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockResolvedValue("tx-hash-success");
+        mockSigner.waitForFinalization.mockResolvedValue({
+          status: "finalized",
+          sender: payerAddress,
+          recipient: sponsorAddress,
+        });
+        const facilitator = new ExactConcordiumFacilitator({ signer: mockSigner });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result).toEqual({
+          success: true,
+          network: CONCORDIUM_TESTNET_CAIP2,
+          transaction: "tx-hash-success",
+          payer: payerAddress,
+        });
+      });
+
+      it("should accept committed status when finalization is not required", async () => {
+        const mockSigner = createMockFacilitatorSigner(sponsorAddress);
+        mockSigner.addSponsorSignature.mockResolvedValue({ sponsored: true } as any);
+        mockSigner.submitTransaction.mockResolvedValue("tx-hash-committed");
+        mockSigner.waitForFinalization.mockResolvedValue({
+          status: "committed",
+          sender: payerAddress,
+          recipient: sponsorAddress,
+        });
+        const facilitator = new ExactConcordiumFacilitator({
+          signer: mockSigner,
+          requireFinalization: false,
+        });
+        vi.spyOn(facilitator, "verify").mockResolvedValue({
+          isValid: true,
+          payer: payerAddress,
+        });
+
+        const result = await facilitator.settle(
+          buildSettlePaymentPayload(),
+          buildSettleRequirements(),
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.transaction).toBe("tx-hash-committed");
+      });
+    });
   });
 
   describe("ExactConcordiumClient", () => {
@@ -1878,6 +2231,100 @@ describe("@x402/concordium", () => {
         const grpcClient = (client as any).createGrpcClient(CONCORDIUM_TESTNET_CAIP2);
 
         expect(grpcClient).toBeDefined();
+      });
+    });
+
+    describe("createPaymentPayload", () => {
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      function mockGrpcForClient(client: ExactConcordiumClient, options?: { decimals?: number }) {
+        const mockGrpcClient = {
+          getNextAccountNonce: vi.fn().mockResolvedValue({ nonce: 7n }),
+          getTokenInfo: vi.fn().mockResolvedValue({ state: { decimals: options?.decimals ?? 6 } }),
+        };
+        vi.spyOn(client as any, "createGrpcClient").mockReturnValue(mockGrpcClient);
+        return mockGrpcClient;
+      }
+
+      it("should reject maxTimeoutSeconds <= 5", async () => {
+        const client = new ExactConcordiumClient(createMockClientSigner());
+        mockGrpcForClient(client);
+        await expect(
+          client.createPaymentPayload(2, {
+            scheme: "exact",
+            network: CONCORDIUM_TESTNET_CAIP2,
+            asset: "CCD",
+            amount: "1000",
+            payTo: validAddress,
+            maxTimeoutSeconds: 5,
+            extra: { feePayer: validAddress },
+          }),
+        ).rejects.toThrow("requirements.maxTimeoutSeconds must be an integer greater than 5");
+      });
+
+      it("should build and sign a native CCD payment payload", async () => {
+        const client = new ExactConcordiumClient(createMockClientSigner());
+        mockGrpcForClient(client);
+        mockTransactionApis.sign.mockResolvedValue({ signed: true } as any);
+        mockTransactionApis.toJSON.mockReturnValue({
+          version: 1,
+          header: { nonce: 7n, numSignatures: 1, executionEnergyAmount: 1000n },
+          payload: { type: "transfer" },
+          signatures: { sender: { "0": { "0": "sig" } } },
+        } as any);
+
+        const result = await client.createPaymentPayload(2, {
+          scheme: "exact",
+          network: CONCORDIUM_TESTNET_CAIP2,
+          asset: "CCD",
+          amount: "1000000",
+          payTo: validAddress,
+          maxTimeoutSeconds: 60,
+          extra: { feePayer: validAddress },
+        });
+
+        expect(result.x402Version).toBe(2);
+        expect(result.payload).toEqual({
+          signedTransaction: {
+            version: 1,
+            header: { nonce: 7, numSignatures: 1, executionEnergyAmount: 1000 },
+            payload: { type: "transfer" },
+            signatures: { sender: { "0": { "0": "sig" } } },
+          },
+        });
+      });
+
+      it("should fetch token decimals from chain for PLT payments", async () => {
+        const client = new ExactConcordiumClient(createMockClientSigner());
+        const mockGrpcClient = mockGrpcForClient(client, { decimals: 8 });
+        const buildPltSpy = vi.spyOn(client as any, "buildPltTransfer").mockReturnValue({
+          addMetadata: vi.fn().mockReturnThis(),
+          addSponsor: vi.fn().mockReturnThis(),
+          build: vi.fn().mockReturnValue({ built: true }),
+        });
+        mockTransactionApis.sign.mockResolvedValue({ signed: true } as any);
+        mockTransactionApis.toJSON.mockReturnValue({
+          version: 1,
+          header: { nonce: 7n },
+          payload: { type: "tokenUpdate", tokenId: "USDR" },
+          signatures: { sender: { "0": { "0": "sig" } } },
+        } as any);
+
+        const result = await client.createPaymentPayload(2, {
+          scheme: "exact",
+          network: CONCORDIUM_TESTNET_CAIP2,
+          asset: "USDR",
+          amount: "2500000",
+          payTo: validAddress,
+          maxTimeoutSeconds: 60,
+          extra: { feePayer: validAddress },
+        });
+
+        expect(mockGrpcClient.getTokenInfo).toHaveBeenCalled();
+        expect(buildPltSpy).toHaveBeenCalledWith(validAddress, "2500000", "USDR", 8);
+        expect(result.payload).toBeDefined();
       });
     });
   });

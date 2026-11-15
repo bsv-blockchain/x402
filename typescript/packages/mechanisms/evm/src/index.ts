@@ -50,6 +50,8 @@ export type {
   BatchSettlementVoucherFields,
   BatchSettlementErc3009Authorization,
   BatchSettlementClaimPayload,
+  BatchSettlementEnrichedDepositPayload,
+  BatchSettlementEnrichedVoucherPayload,
   BatchSettlementEnrichedRefundPayload,
   BatchSettlementVoucherClaim,
   BatchSettlementPayload,
@@ -78,9 +80,15 @@ export {
   claimBatchTypes,
 } from "./batch-settlement/constants";
 
-// Default stablecoins (USD string pricing → token address per chain)
-export { getDefaultAsset } from "./shared/defaultAssets";
-export type { DefaultAssetInfo, ExactDefaultAssetInfo } from "./shared/defaultAssets";
+export {
+  DEFAULT_ASSET_CONTRACT_CACHE_TTL_MS,
+  resetAssetContractCache,
+  startAssetContractCheck,
+  validateAssetIsContract,
+} from "./assetCache";
+
+export { getDefaultAsset, findDefaultAsset } from "./defaultAssets";
+export type { DefaultAssetInfo, ExactDefaultAssetInfo } from "./defaultAssets";
 
 // Extension helpers (client + facilitator)
 export { BUILDER_CODE_KEY, resolveDataSuffix, appendDataSuffix } from "./shared/extensions";
@@ -101,6 +109,8 @@ export {
   verifyHashSignature,
   verifyHashSignatureWithCode,
   classifyErc6492Payer,
+  isCanonicalEcdsaSignature,
+  isPlainNonCanonicalEcdsaSignature,
 } from "./shared/verifySignature";
 export type { Erc6492Classification } from "./shared/verifySignature";
 
@@ -117,8 +127,7 @@ export {
   x402UptoPermit2ProxyABI,
 } from "./constants";
 
-// Default-asset registry (network → token metadata)
-export { DEFAULT_STABLECOINS } from "./shared/defaultAssets";
+export { DEFAULT_ASSETS } from "./defaultAssets";
 
 // AuthCapture scheme
 export { AuthCaptureEvmScheme } from "./auth-capture";
@@ -136,7 +145,12 @@ export { isAuthCaptureExtra, isAuthCapturePayload } from "./auth-capture/types";
 // AuthCapture constants
 export {
   AUTH_CAPTURE_ESCROW_ADDRESS,
+  AUTH_CAPTURE_ESCROW_V1_0_ADDRESS,
+  AUTH_CAPTURE_ESCROW_V1_1_ADDRESS,
   AUTH_CAPTURE_SCHEME,
   EIP3009_TOKEN_COLLECTOR_ADDRESS,
+  EIP3009_TOKEN_COLLECTOR_V1_0_ADDRESS,
+  OPERATOR_REFUND_COLLECTOR_ADDRESS,
   PERMIT2_TOKEN_COLLECTOR_ADDRESS,
+  resolveAuthCaptureDeployment,
 } from "./auth-capture/constants";

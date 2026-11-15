@@ -25,6 +25,10 @@ EVM_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff
 
 # Optional
 SERVER_URL=http://localhost:4021/weather
+
+# Optional, used by all-networks to pay on Casper Testnet
+CASPER_PRIVATE_KEY=<your-casper-private-key-hex>
+CASPER_PRIVATE_KEY_ALGORITHM=ed25519 # ed25519 (default) or secp256k1
 ```
 
 ## Available Examples
@@ -38,6 +42,7 @@ Each example demonstrates a specific advanced pattern:
 | `error-recovery` | `go run . error-recovery` | Error classification and recovery |
 | `multi-network-priority` | `go run . multi-network-priority` | Network-specific signer registration |
 | `hooks` | `go run . hooks` | Payment lifecycle hooks |
+| `spend-controls` | `go run . spend-controls` | Asset allowlist and USD spend caps |
 
 ## Testing the Examples
 
@@ -123,6 +128,40 @@ client := x402.Newx402Client().
 More specific registrations always override wildcards.
 
 **Use case:** Different signers per network, mainnet/testnet separation, multi-chain applications.
+
+## Example: Spend Controls
+
+By default the client caps recognized pegged assets at `$1` and rejects everything else. Use `SetSpendControls` to raise the cap or opt into non-default tokens (custom ERC-20s).
+
+```go
+client := x402.Newx402Client().
+    SetSpendControls(x402.SpendControls{
+        MaxAmountPerPayment: "$1", // default USD cap on recognized pegged assets
+        AllowedAssets: []x402.SpendControlAsset{
+            // opt-in non-default with atomic cap
+            {Network: "eip155:*", Asset: "0xCustomToken", MaxAmountPerPayment: "2000000"},
+            // opt-in non-default uncapped
+            {Network: "eip155:*", Asset: "0xOtherToken"},
+            // override USD cap for a default asset by ticker (or on-chain id)
+            {Network: "eip155:*", Asset: "USDC", MaxAmountPerPayment: "1000000"},
+        },
+    }).
+    Register("eip155:*", evm.NewExactEvmScheme(evmSigner, nil))
+```
+
+| Control | Purpose |
+| --- | --- |
+| `DisableSpendControls()` | Disable all spend controls (any asset, no caps). Useful for UI-confirmed flows and tests. |
+| `MaxAmountPerPayment` | USD ceiling on recognized pegged assets (default `$1`). Set a higher value to raise the cap, or set `DisableMaxAmountPerPayment: true` to remove it. |
+| `AllowedAssets` | Opt-in for non-default tokens. List of `{ Network, Asset }` with optional atomic `MaxAmountPerPayment`, or set `AllowAnyAsset: true` to allow any asset. `Asset` may be an on-chain id or a default-asset symbol (e.g. `"PYUSD"`). |
+
+**Use case:**
+
+- Bound spend against a malicious 402 or unbounded custom token
+- Allow a specific custom token without disabling the USD cap on stables
+- Override the cap for one ticker (e.g. PYUSD) without raising it globally
+
+Run the example: `go run . spend-controls`
 
 ## Example: Custom Transport
 

@@ -7,7 +7,10 @@
 // carry no policy/business semantics.
 package facilitator
 
-import batchsettlement "github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement"
+import (
+	"github.com/x402-foundation/x402/go/v2/mechanisms/evm"
+	batchsettlement "github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement"
+)
 
 const (
 	// Payload parsing errors
@@ -21,11 +24,11 @@ const (
 	ErrNetworkMismatch       = "invalid_batch_settlement_evm_network_mismatch"
 
 	// Channel config validation errors
-	ErrReceiverMismatch           = "invalid_batch_settlement_evm_receiver_mismatch"
-	ErrReceiverAuthorizerMismatch = "invalid_batch_settlement_evm_receiver_authorizer_mismatch"
-	ErrTokenMismatch              = "invalid_batch_settlement_evm_token_mismatch"
-	ErrWithdrawDelayOutOfRange    = "invalid_batch_settlement_evm_withdraw_delay_out_of_range"
-	ErrWithdrawDelayMismatch      = "invalid_batch_settlement_evm_withdraw_delay_mismatch"
+	ErrReceiverMismatch           = batchsettlement.ErrReceiverMismatch
+	ErrReceiverAuthorizerMismatch = batchsettlement.ErrReceiverAuthorizerMismatch
+	ErrTokenMismatch              = batchsettlement.ErrTokenMismatch
+	ErrWithdrawDelayOutOfRange    = batchsettlement.ErrWithdrawDelayOutOfRange
+	ErrWithdrawDelayMismatch      = batchsettlement.ErrWithdrawDelayMismatch
 	ErrChannelIdMismatch          = "invalid_batch_settlement_evm_channel_id_mismatch"
 
 	// ERC-3009 authorization errors
@@ -47,7 +50,7 @@ const (
 	// so the corrective-recovery client check (client/scheme.go) and the
 	// facilitator emitter share a single source of truth and can never drift.
 	ErrMaxClaimableTooLow     = batchsettlement.ErrCumulativeBelowClaimed
-	ErrMaxClaimableExceedsBal = "invalid_batch_settlement_evm_cumulative_exceeds_balance"
+	ErrMaxClaimableExceedsBal = batchsettlement.ErrCumulativeExceedsBalance
 	ErrInsufficientBalance    = "invalid_batch_settlement_evm_insufficient_balance"
 
 	// Permit2 deposit authorization errors.
@@ -88,7 +91,9 @@ const (
 	ErrSettleTransactionFailed  = "invalid_batch_settlement_evm_settle_transaction_failed"
 	ErrRefundTransactionFailed  = "invalid_batch_settlement_evm_refund_transaction_failed"
 	ErrTransactionReverted      = "invalid_batch_settlement_evm_transaction_reverted"
-	ErrWaitForReceipt           = "invalid_batch_settlement_evm_wait_for_receipt_failed"
+	// Reserved wire value; do not reassign.
+	ErrWaitForReceipt    = "invalid_batch_settlement_evm_wait_for_receipt_failed"
+	ErrSettlementPending = evm.ErrSettlementPending
 
 	// Simulation errors
 	ErrDepositSimulationFailed = "invalid_batch_settlement_evm_deposit_simulation_failed"
@@ -111,7 +116,26 @@ const (
 	ErrAuthorizerNotConfigured   = "invalid_batch_settlement_evm_authorizer_not_configured"
 
 	// Settle action errors
-	ErrUnknownSettleAction = "invalid_batch_settlement_evm_unknown_settle_action"
-	ErrNothingToSettle     = "invalid_batch_settlement_evm_nothing_to_settle"
-	ErrRefundNoBalance     = batchsettlement.ErrRefundNoBalance
+	ErrUnknownSettleAction   = "invalid_batch_settlement_evm_unknown_settle_action"
+	ErrNothingToSettle       = "invalid_batch_settlement_evm_nothing_to_settle"
+	ErrRefundedEventMismatch = "invalid_batch_settlement_evm_refunded_event_mismatch"
+	ErrRefundNoBalance       = batchsettlement.ErrRefundNoBalance
+
+	// Managed voucher-store / refund-authorizer reasons. Aliased from the root
+	// package so facilitator callers share a single wire value.
+	ErrUnexpectedPendingId           = batchsettlement.ErrUnexpectedPendingId
+	ErrUnexpectedCancel              = batchsettlement.ErrUnexpectedCancel
+	ErrChannelBusy                   = batchsettlement.ErrChannelBusy
+	ErrCumulativeAmountMismatch      = batchsettlement.ErrCumulativeAmountMismatch
+	ErrPendingIdMismatch             = batchsettlement.ErrPendingIdMismatch
+	ErrVoucherStoreUnavailable       = batchsettlement.ErrVoucherStoreUnavailable
+	ErrRefundAuthorizerMismatch      = batchsettlement.ErrRefundAuthorizerMismatch
+	ErrRefundAuthorizerSignature     = batchsettlement.ErrRefundAuthorizerSignature
+	ErrRefundAmountInvalid           = batchsettlement.ErrRefundAmountInvalid
+	ErrMissingChannel                = batchsettlement.ErrMissingChannel
+	ErrChargeExceedsSignedCumulative = batchsettlement.ErrChargeExceedsSignedCumulative
+	// ErrDelegatedSettleUnauthenticated rejects a delegated managed deposit
+	// whose caller identity cannot be resolved or conflicts with the durable
+	// channel binding. Returned before anything is submitted onchain.
+	ErrDelegatedSettleUnauthenticated = "invalid_batch_settlement_evm_delegated_settle_unauthenticated"
 )

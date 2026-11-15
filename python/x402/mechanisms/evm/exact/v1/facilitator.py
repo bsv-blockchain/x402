@@ -12,12 +12,15 @@ from ...constants import (
     ERR_FACTORY_NOT_ALLOWED,
     ERR_FAILED_TO_GET_NETWORK_CONFIG,
     ERR_FAILED_TO_VERIFY_SIGNATURE,
+    ERR_INVALID_PAYLOAD,
     ERR_INVALID_SIGNATURE,
+    ERR_INVALID_SIGNATURE_S,
     ERR_MISSING_EIP712_DOMAIN,
     ERR_NETWORK_MISMATCH,
     ERR_RECIPIENT_MISMATCH,
     ERR_SMART_WALLET_DEPLOYMENT_FAILED,
     ERR_TRANSACTION_FAILED,
+    ERR_TRANSFER_EVENT_MISMATCH,
     ERR_UNDEPLOYED_SMART_WALLET,
     ERR_UNSUPPORTED_SCHEME,
     ERR_VALID_AFTER_FUTURE,
@@ -27,16 +30,23 @@ from ...constants import (
 )
 from ...erc6492 import has_deployment_info, parse_erc6492_signature
 from ...signer import FacilitatorEvmSigner
-from ...types import ERC6492SignatureData, ExactEIP3009Payload
+from ...types import (
+    ERC6492SignatureData,
+    ExactEIP3009Payload,
+    get_payload_payer,
+    validate_eip3009_payload,
+)
 from ...utils import bytes_to_hex, hex_to_bytes, normalize_address
 from ...v1.utils import get_evm_chain_id
 from ..eip3009_utils import (
     classify_eip3009_signature,
     diagnose_eip3009_simulation_failure,
     execute_transfer_with_authorization,
+    is_plain_non_canonical_ecdsa_signature,
     parse_eip3009_authorization,
     parse_eip3009_transfer_error,
     simulate_eip3009_transfer,
+    verify_eip3009_transfer_event,
 )
 
 
@@ -117,6 +127,14 @@ class ExactEvmSchemeV1:
         requirements: PaymentRequirementsV1,
         context=None,
     ) -> VerifyResponse:
+        payload_error = validate_eip3009_payload(payload.payload)
+        if payload_error:
+            return VerifyResponse(
+                is_valid=False,
+                invalid_reason=ERR_INVALID_PAYLOAD,
+                invalid_message=payload_error,
+                payer=get_payload_payer(payload.payload),
+            )
         return self._verify(payload, requirements, simulate=True)
 
     def _verify(
@@ -209,6 +227,13 @@ class ExactEvmSchemeV1:
 
         try:
             signature = hex_to_bytes(evm_payload.signature)
+            payer_code = self._signer.get_code(payer)
+            if is_plain_non_canonical_ecdsa_signature(signature, len(payer_code) > 0):
+                return VerifyResponse(
+                    is_valid=False,
+                    invalid_reason=ERR_INVALID_SIGNATURE_S,
+                    payer=payer,
+                )
             classification = classify_eip3009_signature(
                 self._signer,
                 evm_payload.authorization,
@@ -217,6 +242,7 @@ class ExactEvmSchemeV1:
                 token_address,
                 extra["name"],
                 extra["version"],
+                payer_code,
             )
             if not classification.valid and classification.is_undeployed:
                 if not has_deployment_info(classification.sig_data):
@@ -304,6 +330,17 @@ class ExactEvmSchemeV1:
         Returns:
             SettleResponse with success, transaction, and payer.
         """
+        payload_error = validate_eip3009_payload(payload.payload)
+        if payload_error:
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_INVALID_PAYLOAD,
+                error_message=payload_error,
+                network=requirements.network,
+                payer=get_payload_payer(payload.payload),
+                transaction="",
+            )
+
         # First verify
         verify_result = self._verify(
             payload,
@@ -385,6 +422,21 @@ class ExactEvmSchemeV1:
                 return SettleResponse(
                     success=False,
                     error_reason=ERR_TRANSACTION_FAILED,
+                    transaction=tx_hash,
+                    network=network,
+                    payer=payer,
+                )
+
+            if receipt.logs is not None and not verify_eip3009_transfer_event(
+                receipt.logs,
+                token_address,
+                from_address=parsed_authorization.from_address,
+                to=parsed_authorization.to,
+                value=parsed_authorization.value,
+            ):
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_TRANSFER_EVENT_MISMATCH,
                     transaction=tx_hash,
                     network=network,
                     payer=payer,

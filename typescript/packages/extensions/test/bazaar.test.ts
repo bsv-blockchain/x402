@@ -26,12 +26,6 @@ import type { DiscoveredMCPResource } from "../src/bazaar/facilitator";
 import type { HTTPAdapter, HTTPRequestContext } from "@x402/core/http";
 
 describe("Bazaar Discovery Extension", () => {
-  describe("BAZAAR constant", () => {
-    it("should export the correct extension identifier", () => {
-      expect(BAZAAR.key).toBe("bazaar");
-    });
-  });
-
   describe("declareDiscoveryExtension - GET method", () => {
     it("should create a valid GET extension with query params", () => {
       const result = declareDiscoveryExtension({
@@ -1408,6 +1402,38 @@ describe("Bazaar Discovery Extension", () => {
       expect(postResult.valid).toBe(true);
     });
 
+    // Issue #3511: a route registered without a verb returns 402 for any method,
+    // so the probe method can disagree with the declared input shape.
+    it.each([
+      {
+        name: "body declaration probed with GET",
+        config: { input: { prompt: "hi" }, bodyType: "json" as const },
+        probe: "GET",
+        expected: "POST",
+      },
+      {
+        name: "query declaration probed with POST",
+        config: { input: { q: "hi" } },
+        probe: "POST",
+        expected: "GET",
+      },
+    ])("should not advertise the probe method for a $name", ({ config, probe, expected }) => {
+      const declared = declareDiscoveryExtension(config);
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(declared.bazaar, {
+        method: probe,
+        path: "/test",
+        adapter: createMockAdapter(),
+      }) as DiscoveryExtension;
+
+      expect((enriched.info as BodyDiscoveryInfo).input.method).toBe(expected);
+      expect(extractMethodEnum(enriched.schema as Record<string, unknown>)).toEqual([expected]);
+      expect(
+        validateDiscoveryExtensionSpec(enriched as unknown as Record<string, unknown>),
+      ).toEqual({ valid: true });
+      expect(validateDiscoveryExtension(enriched)).toEqual({ valid: true });
+    });
+
     it("should return unchanged declaration for non-HTTP context", () => {
       const declared = declareDiscoveryExtension({
         input: { data: "test" },
@@ -1643,6 +1669,115 @@ describe("Bazaar Discovery Extension", () => {
 
       expect(discovered).not.toBeNull();
       expect(discovered!.resourceUrl).toBe("https://mcp.example.com/tools");
+    });
+  });
+
+  describe("extractDiscoveryInfo - opaque-origin resource schemes", () => {
+    // mcp:// is not a WHATWG "special scheme" (only http/https/ws/wss/ftp/file
+    // are), so it parses to an opaque origin, and URL.prototype.origin
+    // serializes an opaque origin as the literal string "null" — see
+    // https://github.com/x402-foundation/x402/issues/3121. The fix is
+    // scheme-agnostic (detect the opaque-origin sentinel, not a scheme
+    // allowlist), so this pins the general rule with two independent
+    // schemes, not just mcp://, to catch the next undocumented scheme
+    // before it regresses the same way.
+    const declared = declareDiscoveryExtension({
+      toolName: "financial_analysis",
+      description: "Analyze financial data",
+      inputSchema: {
+        type: "object",
+        properties: { ticker: { type: "string" } },
+      },
+    });
+    const buildPayload = (url: string) => ({
+      x402Version: 2,
+      scheme: "exact",
+      network: "eip155:8453" as unknown,
+      payload: {},
+      accepted: {} as unknown,
+      resource: { url },
+      extensions: {
+        [BAZAAR.key]: declared.bazaar,
+      },
+    });
+
+    it("should use the raw resource URL as canonical for mcp:// (opaque origin)", () => {
+      const discovered = extractDiscoveryInfo(
+        buildPayload("mcp://tool/financial_analysis"),
+        {} as unknown,
+      );
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("mcp://tool/financial_analysis");
+      expect(discovered!.resourceUrl).not.toContain("null");
+    });
+
+    it("should use the raw resource URL as canonical for an arbitrary non-special scheme (opaque origin)", () => {
+      // Not mcp:// — a made-up scheme this package has never heard of, to
+      // prove the fix doesn't special-case mcp specifically.
+      const discovered = extractDiscoveryInfo(
+        buildPayload("test-scheme://tool/financial_analysis"),
+        {} as unknown,
+      );
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("test-scheme://tool/financial_analysis");
+      expect(discovered!.resourceUrl).not.toContain("null");
+    });
+
+    it("should strip query params from an opaque-origin resource URL", () => {
+      // The gap whawk46 flagged on #3138: the opaque-origin branch above
+      // used the raw resourceUrl verbatim, so a query string survived into
+      // the canonical instead of being stripped like every special-scheme
+      // canonical already strips it. `mcp://tool/x?session=abc` recreates
+      // the per-variant catalog duplication the stripping exists to
+      // prevent unless it's stripped here too.
+      const discovered = extractDiscoveryInfo(
+        buildPayload("mcp://tool/financial_analysis?session=abc"),
+        {} as unknown,
+      );
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("mcp://tool/financial_analysis");
+      expect(discovered!.resourceUrl).not.toContain("session");
+      expect(discovered!.resourceUrl).not.toContain("?");
+    });
+
+    it("should use routeTemplate for an opaque-origin resource URL", () => {
+      // Requested in review on #3138: the opaque-origin branch must not
+      // ignore routeTemplate, or each concrete path variant is catalogued
+      // separately, which is the duplication the template exists to prevent.
+      const extension = declareDiscoveryExtension({
+        input: {},
+        inputSchema: { properties: {} },
+      }).bazaar;
+      const enrichedExtension = {
+        ...extension,
+        routeTemplate: "/users/:userId",
+        info: {
+          ...extension.info,
+          input: { ...extension.info.input, pathParams: { userId: "123" } },
+        },
+      };
+
+      const discovered = extractDiscoveryInfo(
+        {
+          x402Version: 2,
+          scheme: "exact",
+          network: "eip155:8453" as unknown,
+          payload: {},
+          accepted: {} as unknown,
+          resource: { url: "mcp://tool/users/123?session=abc" },
+          extensions: {
+            [BAZAAR.key]: enrichedExtension,
+          },
+        },
+        {} as unknown,
+        false,
+      );
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("mcp://tool/users/:userId");
     });
   });
 
@@ -1972,6 +2107,28 @@ describe("Bazaar Discovery Extension", () => {
       expect(input.pathParams).toEqual({ var1: "san-francisco" });
     });
 
+    it("should not emit routeTemplate for a bare wildcard * pattern", () => {
+      const declared = declareDiscoveryExtension({
+        input: {},
+        inputSchema: { properties: {} },
+      });
+      const extension = declared.bazaar;
+
+      const httpContext: HTTPRequestContext = {
+        method: "GET",
+        path: "/api/rotation",
+        routePattern: "*",
+        adapter: createMockAdapterWithPath("/api/rotation"),
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as Record<string, unknown>;
+
+      expect(enriched.routeTemplate).toBeUndefined();
+    });
+
     it("should auto-convert multiple wildcards to :var1, :var2, etc.", () => {
       const declared = declareDiscoveryExtension({
         input: {},
@@ -2116,6 +2273,42 @@ describe("Bazaar Discovery Extension", () => {
     it("rejects percent-encoded traversal sequences", () => {
       expect(isValidRouteTemplate("/users/%2e%2e/admin")).toBe(false);
       expect(isValidRouteTemplate("/users/%2E%2E/admin")).toBe(false);
+    });
+
+    it("rejects double-encoded traversal sequences (regression for double-decode bypass)", () => {
+      // %25 decodes to "%", so %252e%252e decodes-once to "%2e%2e" (still
+      // encoded) and only decodes-twice to "..". A single-pass decode
+      // wouldn't see the traversal here.
+      expect(isValidRouteTemplate("/users/%252e%252e/admin")).toBe(false);
+      expect(isValidRouteTemplate("/users/%252E%252E/admin")).toBe(false);
+    });
+
+    it("rejects triple-encoded traversal sequences", () => {
+      expect(isValidRouteTemplate("/users/%25252e%25252e/admin")).toBe(false);
+    });
+
+    it("rejects double-encoded scheme injection", () => {
+      // %3a decodes to ":", %2f decodes to "/" — %253a%252f%252f decodes-once
+      // to "%3a%2f%2f" (still encoded) and decodes-twice to "://".
+      expect(isValidRouteTemplate("/users/javascript%253a%252f%252fevil")).toBe(false);
+    });
+
+    it("still accepts a legitimate single percent-encoded segment", () => {
+      // One decode pass resolves this to plain text with no further
+      // encoding, reaching a fixed point immediately — must not be rejected
+      // just for containing a "%".
+      expect(isValidRouteTemplate("/search/caf%C3%A9")).toBe(true);
+    });
+
+    it("rejects a value whose percent-encoding never resolves to a fixed point", () => {
+      // Pathologically deep encoding (more than the decode-pass budget) has
+      // no safe canonical form to validate — reject rather than decode
+      // indefinitely. ":" is re-encoded ("%3A" → "%253A" → ...) on every
+      // encodeURIComponent pass, so this compounds correctly (unlike "..",
+      // whose dots encodeURIComponent leaves untouched).
+      let value: string = ":";
+      for (let i = 0; i < 8; i++) value = encodeURIComponent(value);
+      expect(isValidRouteTemplate(`/users/x${value}/admin`)).toBe(false);
     });
   });
 
@@ -2554,6 +2747,71 @@ describe("Bazaar Discovery Extension", () => {
       spy.mockRestore();
     });
 
+    it("should keep protocol checks when runtime code generation is unavailable", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const ext = declareDiscoveryExtension({
+        input: { q: "test" },
+        inputSchema: { properties: { q: { type: "string" } } },
+      });
+      const accepts = [
+        { scheme: "exact", payTo: "0x1", price: "$0.01", network: "eip155:1" as const },
+      ];
+      const routes = {
+        "/valid": {
+          accepts,
+          extensions: ext,
+        },
+        "/invalid": {
+          accepts,
+          extensions: {
+            bazaar: {
+              info: { input: { type: "grpc" } },
+              schema: {},
+            },
+          },
+        },
+      };
+
+      try {
+        vi.stubGlobal("Function", function () {
+          throw new EvalError("Code generation from strings disallowed for this context");
+        });
+        validateBazaarRouteExtensions(routes);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][0]).toContain('Route "/invalid"');
+        expect(warnSpy.mock.calls[0][0]).toContain("input.type");
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+        warnSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it("should warn when a bazaar extension has a malformed JSON schema in Node", () => {
+      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const routes = {
+        "/api": {
+          accepts: [
+            { scheme: "exact", payTo: "0x1", price: "$0.01", network: "eip155:1" as const },
+          ],
+          extensions: {
+            bazaar: {
+              info: { input: { type: "http", method: "GET" } },
+              schema: { type: "not-a-json-schema-type" },
+            },
+          },
+        },
+      };
+
+      validateBazaarRouteExtensions(routes);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][0]).toContain("invalid bazaar extension");
+      spy.mockRestore();
+    });
+
     it("should warn for an extension with invalid input.type", () => {
       const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const routes = {
@@ -2573,6 +2831,153 @@ describe("Bazaar Discovery Extension", () => {
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy.mock.calls[0][0]).toContain("invalid bazaar extension");
       spy.mockRestore();
+    });
+
+    it("should warn for a malformed bazaar extension object", () => {
+      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const routes = {
+        "/api": {
+          accepts: [
+            { scheme: "exact", payTo: "0x1", price: "$0.01", network: "eip155:1" as const },
+          ],
+          extensions: {
+            bazaar: { info: { input: { method: "GET" } } },
+          },
+        },
+      };
+      validateBazaarRouteExtensions(routes);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][0]).toContain("malformed");
+      spy.mockRestore();
+    });
+  });
+
+  describe("SSRF via external $ref/$id in schema (CWE-918)", () => {
+    // The schema is attacker-controlled (it arrives in the client's payment payload). Some
+    // JSON Schema validators dereference "$ref"/"$id" values via an outbound HTTP request or
+    // filesystem read during schema compilation, before the instance is ever checked. Ajv's
+    // default `compile` already throws rather than fetching an unregistered external `$ref`,
+    // but validateDiscoveryExtension explicitly rejects these up front for a consistent error
+    // message across SDKs and as defense-in-depth.
+    /**
+     * Starts a local HTTP server that counts requests it receives, runs the given callback
+     * against it, and tears it down afterwards.
+     *
+     * @param run - Callback invoked with the server's base URL and a hit-count getter
+     * @returns A promise that resolves once the callback has run and the server has shut down
+     */
+    async function withHitCountingServer(
+      run: (baseUrl: string, getHits: () => number) => void | Promise<void>,
+    ): Promise<void> {
+      const http = await import("node:http");
+      let hits = 0;
+      const server = http.createServer((_req, res) => {
+        hits += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ type: "object" }));
+      });
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        await run(`http://127.0.0.1:${port}`, () => hits);
+      } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }
+
+    it("rejects a $ref over http without dereferencing it", async () => {
+      await withHitCountingServer((baseUrl, getHits) => {
+        const extension = {
+          info: { input: { type: "http", method: "GET" } },
+          schema: { $ref: `${baseUrl}/attacker-schema.json` },
+        } as unknown as DiscoveryExtension;
+
+        const result = validateDiscoveryExtension(extension);
+
+        expect(getHits()).toBe(0);
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it("rejects a $ref via file:// URI without reading the file", () => {
+      const extension = {
+        info: { input: { type: "http", method: "GET" } },
+        schema: { $ref: "file:///etc/passwd" },
+      } as unknown as DiscoveryExtension;
+
+      const result = validateDiscoveryExtension(extension);
+
+      expect(result.valid).toBe(false);
+    });
+
+    it("rejects a $ref nested inside schema properties", async () => {
+      await withHitCountingServer((baseUrl, getHits) => {
+        const extension = {
+          info: { input: { type: "http", method: "GET" } },
+          schema: {
+            properties: {
+              input: { $ref: `${baseUrl}/attacker-schema.json` },
+            },
+          },
+        } as unknown as DiscoveryExtension;
+
+        const result = validateDiscoveryExtension(extension);
+
+        expect(getHits()).toBe(0);
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it("rejects an external $id", () => {
+      const extension = {
+        info: { input: { type: "http", method: "GET" } },
+        schema: { $id: "https://evil.example.com/schema.json", type: "object" },
+      } as unknown as DiscoveryExtension;
+
+      const result = validateDiscoveryExtension(extension);
+
+      expect(result.valid).toBe(false);
+    });
+
+    it("still validates schemas with only local fragment refs", () => {
+      const extension = {
+        info: { input: { type: "http", method: "GET" } },
+        schema: {
+          $ref: "#/definitions/root",
+          definitions: { root: { type: "object" } },
+        },
+      } as unknown as DiscoveryExtension;
+
+      const result = validateDiscoveryExtension(extension);
+
+      expect(result.valid).toBe(true);
+    });
+
+    it("rejects an external $ref end-to-end via extractDiscoveryInfo without dereferencing it", async () => {
+      await withHitCountingServer((baseUrl, getHits) => {
+        const extension = {
+          info: { input: { type: "http", method: "GET" } },
+          schema: { $ref: `${baseUrl}/attacker-schema.json` },
+        };
+
+        const paymentPayload = {
+          x402Version: 2,
+          scheme: "exact",
+          network: "eip155:84532" as unknown,
+          payload: {},
+          accepted: {} as unknown,
+          resource: { url: "http://api.example.com/weather" },
+          extensions: {
+            [BAZAAR.key]: extension,
+          },
+        };
+
+        const discovered = extractDiscoveryInfo(paymentPayload, {} as unknown);
+
+        expect(getHits()).toBe(0);
+        expect(discovered).toBeNull();
+      });
     });
   });
 });

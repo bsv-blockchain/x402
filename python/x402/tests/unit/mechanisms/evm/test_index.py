@@ -3,14 +3,6 @@
 import pytest
 
 from x402.mechanisms.evm import (
-    DEFAULT_DECIMALS,
-    DEFAULT_VALIDITY_PERIOD,
-    ERR_INVALID_SIGNATURE,
-    ERR_NETWORK_MISMATCH,
-    ERR_UNSUPPORTED_SCHEME,
-    SCHEME_EXACT,
-    TX_STATUS_FAILED,
-    TX_STATUS_SUCCESS,
     ClientEvmSigner,
     EthAccountSigner,
     ExactEIP3009Payload,
@@ -23,19 +15,20 @@ from x402.mechanisms.evm import (
     format_amount,
     get_asset_info,
     get_evm_chain_id,
-    get_network_config,
     hex_to_bytes,
     is_valid_address,
     is_valid_network,
+    is_valid_tx_hash,
     normalize_address,
     parse_amount,
-    parse_money_to_decimal,
 )
+from x402.mechanisms.evm.default_assets import get_default_asset
 from x402.mechanisms.evm.exact import (
     ExactEvmClientScheme,
     ExactEvmFacilitatorScheme,
     ExactEvmServerScheme,
 )
+from x402.schemas.helpers import number_to_decimal_string, parse_money, parse_money_string
 
 
 class TestExports:
@@ -92,6 +85,35 @@ class TestIsValidAddress:
     def test_should_reject_addresses_with_invalid_characters(self):
         """Should reject addresses with invalid hex characters."""
         assert is_valid_address("0xGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv") is False
+
+
+class TestIsValidTxHash:
+    """Test is_valid_tx_hash function."""
+
+    def test_should_accept_well_formed_hashes(self):
+        """Should accept 0x-prefixed 32-byte hex hashes in either case."""
+        assert is_valid_tx_hash("0x" + "ab" * 32) is True
+        assert is_valid_tx_hash("0x" + "AB" * 32) is True
+
+    def test_should_reject_malformed_hashes(self):
+        """Should reject wrong lengths, missing prefix, and non-hex payloads."""
+        assert is_valid_tx_hash("") is False
+        assert is_valid_tx_hash("0xnothash") is False
+        assert is_valid_tx_hash("ab" * 32) is False  # Missing 0x prefix
+        assert is_valid_tx_hash("0x" + "ab" * 31) is False  # Too short
+        assert is_valid_tx_hash("0x" + "zz" * 32) is False  # Invalid hex
+
+    def test_should_reject_hex_literal_syntax(self):
+        """Should reject int()-parseable forms that are not valid hashes."""
+        assert is_valid_tx_hash("0x" + "1_" * 32) is False  # Digit separators
+        assert is_valid_tx_hash("0x " + "a" * 63) is False  # Leading whitespace
+        assert is_valid_tx_hash("0x+" + "a" * 63) is False  # Signed
+
+    def test_should_reject_non_string_hashes(self):
+        """Should reject non-string values from external signers."""
+        assert is_valid_tx_hash(None) is False
+        assert is_valid_tx_hash(123) is False
+        assert is_valid_tx_hash(b"0x" + b"ab" * 32) is False
 
 
 class TestNormalizeAddress:
@@ -154,48 +176,26 @@ class TestGetEvmChainId:
             get_evm_chain_id("eip155:")  # Invalid format
 
 
-class TestGetNetworkConfig:
-    """Test get_network_config function (CAIP-2 only)."""
-
-    def test_should_return_config_for_supported_networks(self):
-        """Should return config for supported networks."""
-        config = get_network_config("eip155:8453")
-
-        assert config is not None
-        assert config["chain_id"] == 8453
-        assert "default_asset" in config
-
-    def test_should_reject_legacy_names(self):
-        """Should reject legacy network names (use evm.v1.utils for v1)."""
-        with pytest.raises(ValueError, match="expected eip155:CHAIN_ID"):
-            get_network_config("base")
-
-    def test_should_return_minimal_config_for_unknown_networks(self):
-        """Should return a minimal config with chain_id for valid but unconfigured networks."""
-        config = get_network_config("eip155:99999")
-        assert config["chain_id"] == 99999
-
-
 class TestGetAssetInfo:
     """Test get_asset_info function."""
 
-    def test_should_return_asset_info_by_symbol(self):
-        """Should return asset info for known address (get_asset_info takes address, not symbol)."""
+    def test_should_return_configured_default_asset_info(self):
+        """Should return asset info for a configured default asset."""
         network = "eip155:8453"
-        usdc_address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        asset_info = get_asset_info(network, usdc_address)
+        asset = get_default_asset(network)
+        asset_info = get_asset_info(network, asset["asset"])
 
         assert asset_info["address"].startswith("0x")
-        assert asset_info["name"] == "USD Coin"
-        assert asset_info["decimals"] == 6
+        assert asset_info["name"] == asset["name"]
+        assert asset_info["decimals"] == asset["decimals"]
 
     def test_should_return_asset_info_by_address(self):
         """Should return asset info by address."""
         network = "eip155:8453"
-        usdc_address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        asset_info = get_asset_info(network, usdc_address)
+        asset = get_default_asset(network)
+        asset_info = get_asset_info(network, asset["asset"])
 
-        assert asset_info["address"].lower() == usdc_address.lower()
+        assert asset_info["address"].lower() == asset["asset"].lower()
 
     def test_should_raise_for_unknown_asset(self):
         """Should raise ValueError for an unregistered asset address."""
@@ -317,61 +317,71 @@ class TestBytesToHex:
         assert result == "0x"
 
 
-class TestParseMoneyToDecimal:
-    """Test parse_money_to_decimal function."""
+class TestNumberToDecimalString:
+    """Test number_to_decimal_string (used by parse_money for number input)."""
 
-    def test_should_parse_dollar_string_prices(self):
-        """Should parse dollar string prices."""
-        assert parse_money_to_decimal("$1.50") == 1.5
-        assert parse_money_to_decimal("$0.10") == 0.1
-        assert parse_money_to_decimal("$100") == 100.0
+    def test_integers(self):
+        assert number_to_decimal_string(0) == "0"
+        assert number_to_decimal_string(1) == "1"
+        assert number_to_decimal_string(42) == "42"
+        assert number_to_decimal_string(-5) == "-5"
 
-    def test_should_parse_simple_number_strings(self):
-        """Should parse simple number strings."""
-        assert parse_money_to_decimal("1.50") == 1.5
-        assert parse_money_to_decimal("0.10") == 0.1
-        assert parse_money_to_decimal("100") == 100.0
+    def test_decimals(self):
+        assert number_to_decimal_string(1.5) == "1.5"
+        assert number_to_decimal_string(4.02) == "4.02"
+        assert number_to_decimal_string(0.123) == "0.123"
+        assert number_to_decimal_string(-3.14) == "-3.14"
 
-    def test_should_parse_numbers(self):
-        """Should parse numbers."""
-        assert parse_money_to_decimal(1.5) == 1.5
-        assert parse_money_to_decimal(100) == 100.0
+    def test_expands_scientific_notation(self):
+        assert number_to_decimal_string(1e-7) == "0.0000001"
+        assert number_to_decimal_string(1e-8) == "0.00000001"
+        assert number_to_decimal_string(1.5e-6) == "0.0000015"
+        assert number_to_decimal_string(1e-18) == "0.000000000000000001"
 
-    def test_should_strip_usd_usdc_suffixes(self):
-        """Should strip USD/USDC suffixes."""
-        assert parse_money_to_decimal("1.50 USD") == 1.5
-        assert parse_money_to_decimal("1.50 USDC") == 1.5
-        assert parse_money_to_decimal("1.50 usd") == 1.5
-        assert parse_money_to_decimal("1.50 usdc") == 1.5
+    def test_negative_scientific_notation(self):
+        assert number_to_decimal_string(-1e-7) == "-0.0000001"
+        assert number_to_decimal_string(-2.5e-10) == "-0.00000000025"
 
-    def test_should_raise_for_invalid_formats(self):
-        """Should raise ValueError for invalid formats."""
-        with pytest.raises(ValueError):
-            parse_money_to_decimal("not-a-number")
+    def test_large_scientific_notation(self):
+        assert number_to_decimal_string(1e20) == "100000000000000000000"
+        # Python str(1.5e10) is "15000000000.0" (no scientific notation to expand).
+        assert number_to_decimal_string(1.5e10) == "15000000000.0"
 
 
-class TestConstants:
-    """Test that constants are exported with correct values."""
+class TestParseMoney:
+    """Test parse_money (TS parseMoney port)."""
 
-    def test_should_export_scheme_exact(self):
-        """Should export scheme identifier."""
-        assert SCHEME_EXACT == "exact"
+    def test_parses_bare_and_dollar_amounts(self):
+        assert parse_money("$1.50") == {"amount": "1.50"}
+        assert parse_money("1.50") == {"amount": "1.50"}
+        assert parse_money(1.5) == {"amount": "1.5"}
 
-    def test_should_export_default_decimals(self):
-        """Should export default decimals."""
-        assert DEFAULT_DECIMALS == 6
+    def test_parses_suffixed_ticker(self):
+        assert parse_money("1.50 USDT") == {"amount": "1.50", "symbol": "USDT"}
+        assert parse_money("1.50 usdt") == {"amount": "1.50", "symbol": "USDT"}
 
-    def test_should_export_default_validity_period(self):
-        """Should export default validity period."""
-        assert DEFAULT_VALIDITY_PERIOD == 3600  # 1 hour
+    def test_strips_usd_to_no_symbol(self):
+        assert parse_money("1.50 USD") == {"amount": "1.50"}
 
-    def test_should_export_transaction_status_constants(self):
-        """Should export transaction status constants."""
-        assert TX_STATUS_SUCCESS == 1
-        assert TX_STATUS_FAILED == 0
+    def test_rejects_glued_tickers(self):
+        with pytest.raises(ValueError, match="Invalid money format"):
+            parse_money("1.50USDT")
 
-    def test_should_export_error_codes(self):
-        """Should export error codes."""
-        assert ERR_INVALID_SIGNATURE is not None
-        assert ERR_UNSUPPORTED_SCHEME is not None
-        assert ERR_NETWORK_MISMATCH is not None
+    def test_rejects_negatives(self):
+        with pytest.raises(ValueError, match="Invalid money format: -5"):
+            parse_money(-5)
+        with pytest.raises(ValueError, match="Invalid money format"):
+            parse_money("-1.50")
+        with pytest.raises(ValueError, match="Invalid money format"):
+            parse_money("-$1.50")
+        with pytest.raises(ValueError, match="Invalid money format"):
+            parse_money_string("-1.50")
+
+    def test_keeps_parse_money_string_rejecting_suffixes(self):
+        with pytest.raises(ValueError, match="Invalid money format"):
+            parse_money_string("1.50 USDT")
+
+    def test_returns_extracted_decimal_substring(self):
+        assert parse_money_string("$1.50") == "1.50"
+        assert parse_money_string("1.00") == "1.00"
+        assert parse_money_string("0.00") == "0.00"

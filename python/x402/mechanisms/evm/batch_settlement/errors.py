@@ -29,6 +29,7 @@ ERR_INSUFFICIENT_BALANCE = "invalid_batch_settlement_evm_insufficient_balance"
 
 ERR_DEPOSIT_PAYLOAD = "invalid_batch_settlement_evm_deposit_payload"
 ERR_DEPOSIT_SIMULATION_FAILED = "invalid_batch_settlement_evm_deposit_simulation_failed"
+ERR_DEPOSIT_BELOW_MIN_DEPOSIT = "invalid_batch_settlement_evm_deposit_below_min_deposit"
 ERR_DEPOSIT_TRANSACTION_FAILED = "invalid_batch_settlement_evm_deposit_transaction_failed"
 
 # ERC-6492 counterfactual deployment errors (ERC-3009 deposit path). Wire values keep the
@@ -53,6 +54,7 @@ ERR_REFUND_SIMULATION_FAILED = "invalid_batch_settlement_evm_refund_simulation_f
 ERR_REFUND_TRANSACTION_FAILED = "invalid_batch_settlement_evm_refund_transaction_failed"
 ERR_REFUND_AMOUNT_INVALID = "invalid_batch_settlement_evm_refund_amount_invalid"
 ERR_REFUND_NO_BALANCE = "invalid_batch_settlement_evm_refund_no_balance"
+ERR_REFUNDED_EVENT_MISMATCH = "invalid_batch_settlement_evm_refunded_event_mismatch"
 
 ERR_VALID_AFTER_IN_FUTURE = "invalid_batch_settlement_evm_payload_authorization_valid_after"
 ERR_VALID_BEFORE_EXPIRED = "invalid_batch_settlement_evm_payload_authorization_valid_before"
@@ -84,12 +86,16 @@ ERR_ERC20_APPROVAL_WRONG_SPENDER = "invalid_batch_settlement_evm_erc20_approval_
 ERR_ERC20_APPROVAL_BROADCAST_FAILED = "invalid_batch_settlement_evm_erc20_approval_broadcast_failed"
 
 ERR_RPC_READ_FAILED = "invalid_batch_settlement_evm_rpc_read_failed"
+# Reserved wire value; do not reassign.
 ERR_WAIT_FOR_RECEIPT_FAILED = "invalid_batch_settlement_evm_wait_for_receipt_failed"
 ERR_TRANSACTION_REVERTED = "invalid_batch_settlement_evm_transaction_reverted"
 
 # Server-emitted lifecycle reasons
 ERR_CHANNEL_BUSY = "invalid_batch_settlement_evm_channel_busy"
+ERR_INVALID_CHANNEL_ID = "invalid_batch_settlement_evm_channel_id_invalid"
+ERR_VERIFICATION_STATE_UNAVAILABLE = "invalid_batch_settlement_evm_verification_state_unavailable"
 ERR_CHARGE_EXCEEDS_SIGNED_CUMULATIVE = (
     "invalid_batch_settlement_evm_charge_exceeds_signed_cumulative"
 )
 ERR_MISSING_CHANNEL = "invalid_batch_settlement_evm_missing_channel"
+ERR_VOUCHER_STORE_UNAVAILABLE = "invalid_batch_settlement_evm_voucher_store_unavailable"

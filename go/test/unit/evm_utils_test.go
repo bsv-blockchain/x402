@@ -413,74 +413,6 @@ func TestHexRoundTrip(t *testing.T) {
 	}
 }
 
-// TestGetNetworkConfig tests network configuration retrieval
-func TestGetNetworkConfig(t *testing.T) {
-	t.Run("Base Mainnet has default asset", func(t *testing.T) {
-		config, err := evm.GetNetworkConfig("eip155:8453")
-		if err != nil {
-			t.Fatalf("Failed to get config: %v", err)
-		}
-
-		if config.ChainID.Int64() != 8453 {
-			t.Errorf("Expected chain ID 8453, got %d", config.ChainID.Int64())
-		}
-
-		if config.DefaultAsset.Address == "" {
-			t.Error("Expected default asset to be configured")
-		}
-
-		// USDC should have 6 decimals
-		if config.DefaultAsset.Decimals != 6 {
-			t.Errorf("Expected 6 decimals, got %d", config.DefaultAsset.Decimals)
-		}
-	})
-
-	t.Run("Base Sepolia has default asset", func(t *testing.T) {
-		config, err := evm.GetNetworkConfig("eip155:84532")
-		if err != nil {
-			t.Fatalf("Failed to get config: %v", err)
-		}
-
-		if config.ChainID.Int64() != 84532 {
-			t.Errorf("Expected chain ID 84532, got %d", config.ChainID.Int64())
-		}
-
-		if config.DefaultAsset.Address == "" {
-			t.Error("Expected default asset to be configured")
-		}
-	})
-
-	t.Run("Arbitrary EVM chain works without default asset", func(t *testing.T) {
-		config, err := evm.GetNetworkConfig("eip155:999999")
-		if err != nil {
-			t.Fatalf("Failed to get config: %v", err)
-		}
-
-		if config.ChainID.Int64() != 999999 {
-			t.Errorf("Expected chain ID 999999, got %d", config.ChainID.Int64())
-		}
-
-		// Should NOT have default asset
-		if config.DefaultAsset.Address != "" {
-			t.Error("Arbitrary chain should not have default asset")
-		}
-	})
-
-	t.Run("Legacy names rejected", func(t *testing.T) {
-		_, err := evm.GetNetworkConfig("base")
-		if err == nil {
-			t.Error("Expected error for legacy network name; use evm/v1 package for v1 networks")
-		}
-	})
-
-	t.Run("Invalid format returns error", func(t *testing.T) {
-		_, err := evm.GetNetworkConfig("invalid")
-		if err == nil {
-			t.Error("Expected error for invalid network format")
-		}
-	})
-}
-
 // TestGetAssetInfo tests asset information retrieval
 func TestGetAssetInfo(t *testing.T) {
 	t.Run("Explicit address returns asset info", func(t *testing.T) {
@@ -501,15 +433,14 @@ func TestGetAssetInfo(t *testing.T) {
 	})
 
 	t.Run("Known default asset returns rich metadata", func(t *testing.T) {
-		// Base Sepolia USDC address
-		info, err := evm.GetAssetInfo("eip155:84532", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")
+		configured := evm.DefaultAssets["eip155:84532"][0]
+		info, err := evm.GetAssetInfo("eip155:84532", configured.Asset)
 		if err != nil {
 			t.Fatalf("Failed to get asset info: %v", err)
 		}
 
-		// Should match the configured USDC
-		if info.Decimals != 6 {
-			t.Errorf("Expected 6 decimals for USDC, got %d", info.Decimals)
+		if info.Decimals != configured.Decimals {
+			t.Errorf("Expected %d decimals for USDC, got %d", configured.Decimals, info.Decimals)
 		}
 	})
 

@@ -13,10 +13,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from solders.keypair import Keypair
 
 from x402 import x402Facilitator
+from x402.http.extension_responses import EXTENSION_RESPONSES_HEADER
 from x402.extensions.bazaar import (
     DiscoveryResource,
     extract_discovery_info,
@@ -30,7 +31,7 @@ from x402.mechanisms.svm.exact.facilitator import ExactSvmScheme
 load_dotenv()
 
 # Configuration
-PORT = int(os.environ.get("PORT", "4022"))
+PORT = int(os.environ.get("PORT") or "4022")
 
 # Configuration - optional per network
 evm_private_key = os.environ.get("EVM_PRIVATE_KEY")
@@ -103,11 +104,10 @@ class BazaarCatalog:
 
 bazaar_catalog = BazaarCatalog()
 
-EXTENSION_RESPONSES_HEADER = "EXTENSION-RESPONSES"
-
 
 def _set_extension_responses_header(response: Response) -> None:
-    """Attach an example bazaar extension response header for client readback."""
+    """Attach bazaar extension outcomes on the facilitator sidechannel.
+    """
     extension_responses = {"bazaar": {"status": "success"}}
     encoded = base64.b64encode(json.dumps(extension_responses).encode("utf-8")).decode("ascii")
     response.headers[EXTENSION_RESPONSES_HEADER] = encoded
@@ -234,12 +234,16 @@ async def verify(request: VerifyRequest, http_response: Response):
         VerifyResponse with isValid and payer (if valid) or invalidReason.
     """
     try:
-        from x402.schemas import PaymentRequirements, parse_payment_payload
+        from x402.schemas import parse_payment_payload, parse_payment_requirements
 
-        # Parse payload (auto-detects V1/V2) and requirements
+        # Parse payload (auto-detects V1/V2) and requirements (based on payload version)
         payload = parse_payment_payload(request.paymentPayload)
-        requirements = PaymentRequirements.model_validate(request.paymentRequirements)
+        requirements = parse_payment_requirements(payload.x402_version, request.paymentRequirements)
+    except (ValidationError, ValueError) as e:
+        print(f"Verify error: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
+    try:
         # Hooks will automatically:
         # - Track verified payment (on_after_verify)
         # - Extract and catalog discovery info (on_after_verify)
@@ -263,12 +267,16 @@ async def settle(request: SettleRequest, http_response: Response):
         SettleResponse with success, transaction, network, and payer.
     """
     try:
-        from x402.schemas import PaymentRequirements, parse_payment_payload
+        from x402.schemas import parse_payment_payload, parse_payment_requirements
 
-        # Parse payload (auto-detects V1/V2) and requirements
+        # Parse payload (auto-detects V1/V2) and requirements (based on payload version)
         payload = parse_payment_payload(request.paymentPayload)
-        requirements = PaymentRequirements.model_validate(request.paymentRequirements)
+        requirements = parse_payment_requirements(payload.x402_version, request.paymentRequirements)
+    except (ValidationError, ValueError) as e:
+        print(f"Settle error: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
+    try:
         settle_result = await facilitator.settle(payload, requirements)
 
         _set_extension_responses_header(http_response)

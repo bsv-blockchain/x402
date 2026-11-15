@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	x402 "github.com/x402-foundation/x402/go/v2"
@@ -27,7 +28,9 @@ type X402MCPClient struct {
 	onAfterPay    AfterPaymentHook
 }
 
-// NewX402MCPClient creates an x402-aware MCP client.
+// NewX402MCPClient creates an x402-aware MCP client wrapping an existing payment client.
+// Configure spend controls on paymentClient (SetSpendControls / DisableSpendControls)
+// before wrapping; this constructor does not change them.
 func NewX402MCPClient(caller MCPCaller, paymentClient *x402.X402Client, options Options) *X402MCPClient {
 	return &X402MCPClient{
 		caller:        caller,
@@ -37,6 +40,8 @@ func NewX402MCPClient(caller MCPCaller, paymentClient *x402.X402Client, options 
 }
 
 // NewX402MCPClientFromConfig creates an x402-aware MCP client from scheme registrations.
+// The constructed payment client uses the default $1 cap and default-asset allowlist.
+// For custom spend controls, configure an *x402.X402Client and pass it to NewX402MCPClient.
 func NewX402MCPClientFromConfig(caller MCPCaller, schemes []SchemeRegistration, options Options) *X402MCPClient {
 	paymentClient := x402.Newx402Client()
 	for _, reg := range schemes {
@@ -85,7 +90,10 @@ func (c *X402MCPClient) CallTool(ctx context.Context, name string, args map[stri
 		Arguments: args,
 	}
 
-	result, err := c.caller.CallTool(ctx, params)
+	probeCtx, probeCancel := withTimeoutIfNone(ctx, c.probeTimeout())
+	defer probeCancel()
+
+	result, err := c.caller.CallTool(probeCtx, params)
 	if err != nil {
 		return nil, fmt.Errorf("tool call failed: %w", err)
 	}
@@ -172,7 +180,7 @@ func (c *X402MCPClient) CallTool(ctx context.Context, name string, args map[stri
 	}
 
 	payload, err := c.paymentClient.CreatePaymentPayload(
-		ctx,
+		x402.WithPaymentRequired(ctx, *paymentRequired),
 		selected,
 		paymentRequired.Resource,
 		paymentRequired.Extensions,
@@ -196,7 +204,11 @@ func (c *X402MCPClient) callToolWithPayload(ctx context.Context, name string, ar
 		Meta:      mcp.Meta{MCP_PAYMENT_META_KEY: payload},
 	}
 
-	result, err := c.caller.CallTool(ctx, params)
+	timeoutSeconds := payload.Accepted.MaxTimeoutSeconds
+	paidCtx, paidCancel := withTimeoutIfNone(ctx, c.paidTimeout(timeoutSeconds))
+	defer paidCancel()
+
+	result, err := c.caller.CallTool(paidCtx, params)
 	if err != nil {
 		return nil, fmt.Errorf("paid tool call failed: %w", err)
 	}
@@ -214,7 +226,87 @@ func (c *X402MCPClient) callToolWithPayload(ctx context.Context, name string, ar
 		})
 	}
 
+	var paymentRequired *types.PaymentRequired
+	if paymentResponse == nil && result.IsError {
+		paymentRequired = extractPaymentRequired(result)
+	}
+
+	recovered, err := c.handlePaidToolPaymentResponse(ctx, payload, paymentResponse, paymentRequired)
+	if err != nil {
+		return nil, err
+	}
+
+	if recovered && paymentRequired != nil {
+		freshPayload, err := c.paymentClient.CreatePaymentPayload(
+			x402.WithPaymentRequired(ctx, *paymentRequired),
+			payload.Accepted,
+			paymentRequired.Resource,
+			paymentRequired.Extensions,
+		)
+		if err != nil {
+			return buildMCPToolCallResultFromSDK(result, true), nil
+		}
+
+		retryParams := &mcp.CallToolParams{
+			Name:      name,
+			Arguments: args,
+			Meta:      mcp.Meta{MCP_PAYMENT_META_KEY: freshPayload},
+		}
+		retryTimeout := freshPayload.Accepted.MaxTimeoutSeconds
+		retryCtx, retryCancel := withTimeoutIfNone(ctx, c.paidTimeout(retryTimeout))
+		defer retryCancel()
+
+		retryResult, err := c.caller.CallTool(retryCtx, retryParams)
+		if err != nil {
+			return nil, fmt.Errorf("paid tool call failed: %w", err)
+		}
+
+		retryPaymentResponse := extractPaymentResponseFromSDK(retryResult)
+		if c.onAfterPay != nil && retryPaymentResponse != nil {
+			mcpResult := callToolResultToMCPToolResult(retryResult)
+			_ = c.onAfterPay(AfterPaymentContext{
+				ToolName:       name,
+				PaymentPayload: freshPayload,
+				Result:         mcpResult,
+				SettleResponse: retryPaymentResponse,
+			})
+		}
+
+		var retryPaymentRequired *types.PaymentRequired
+		if retryPaymentResponse == nil && retryResult.IsError {
+			retryPaymentRequired = extractPaymentRequired(retryResult)
+		}
+		if _, err := c.handlePaidToolPaymentResponse(ctx, freshPayload, retryPaymentResponse, retryPaymentRequired); err != nil {
+			return nil, err
+		}
+
+		return buildMCPToolCallResultFromSDK(retryResult, true), nil
+	}
+
 	return buildMCPToolCallResultFromSDK(result, true), nil
+}
+
+func (c *X402MCPClient) handlePaidToolPaymentResponse(
+	ctx context.Context,
+	payload types.PaymentPayload,
+	settleResponse *x402.SettleResponse,
+	paymentRequired *types.PaymentRequired,
+) (bool, error) {
+	if settleResponse == nil && paymentRequired == nil {
+		return false, nil
+	}
+
+	prCtx := x402.PaymentResponseContext{
+		PaymentPayload:  payload,
+		Requirements:    payload.Accepted,
+		SettleResponse:  settleResponse,
+		PaymentRequired: paymentRequired,
+	}
+	result, err := c.paymentClient.HandlePaymentResponse(ctx, prCtx)
+	if err != nil {
+		return false, err
+	}
+	return result.Recovered, nil
 }
 
 // callToolWithV1Payment handles the x402 v1 payment flow (legacy). v1 PaymentRequired
@@ -274,12 +366,20 @@ func (c *X402MCPClient) callToolWithV1Payment(
 		}
 	}
 
-	payload, err := c.paymentClient.CreatePaymentPayloadV1(ctx, paymentRequired.Accepts[0])
+	selected, err := c.paymentClient.SelectPaymentRequirementsV1(paymentRequired.Accepts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select v1 payment requirements: %w", err)
+	}
+
+	payload, err := c.paymentClient.CreatePaymentPayloadV1(ctx, selected)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create v1 payment: %w", err)
 	}
 
-	return c.callToolWithPayloadV1(ctx, name, args, payload)
+	paidCtx, paidCancel := withTimeoutIfNone(ctx, c.paidTimeout(selected.MaxTimeoutSeconds))
+	defer paidCancel()
+
+	return c.callToolWithPayloadV1(paidCtx, name, args, payload)
 }
 
 // callToolWithPayloadV1 retries a tool call with a v1 payment attached in _meta.
@@ -462,7 +562,11 @@ func CallPaidTool(
 			return buildResult(result, false), nil
 		}
 
-		payloadV1, err := x402Client.CreatePaymentPayloadV1(ctx, prV1.Accepts[0])
+		selected, err := x402Client.SelectPaymentRequirementsV1(prV1.Accepts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select v1 payment requirements: %w", err)
+		}
+		payloadV1, err := x402Client.CreatePaymentPayloadV1(ctx, selected)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create v1 payment: %w", err)
 		}
@@ -482,7 +586,7 @@ func CallPaidTool(
 	}
 
 	paymentPayload, err := x402Client.CreatePaymentPayload(
-		ctx,
+		x402.WithPaymentRequired(ctx, *paymentRequired),
 		selected,
 		paymentRequired.Resource,
 		paymentRequired.Extensions,
@@ -642,4 +746,65 @@ func paymentRequiredV1ToView(pr *types.PaymentRequiredV1) types.PaymentRequired 
 		})
 	}
 	return types.PaymentRequired{X402Version: 1, Error: pr.Error, Accepts: accepts}
+}
+
+// withTimeoutIfNone adds a deadline only when ctx has none.
+func withTimeoutIfNone(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+const (
+	defaultProbeTimeoutSeconds  = 300
+	defaultAcceptTimeoutSeconds = 300
+	defaultMaxRequestTimeout    = 10 * time.Minute
+	maxTimerSafeDuration        = time.Duration(1<<31-1) * time.Millisecond
+)
+
+func (c *X402MCPClient) maxRequestTimeout() time.Duration {
+	if c.options.MaxRequestTimeout <= 0 {
+		return defaultMaxRequestTimeout
+	}
+	return c.options.MaxRequestTimeout
+}
+
+func (c *X402MCPClient) capSeconds() int {
+	sec := int(c.maxRequestTimeout() / time.Second)
+	if sec <= 0 {
+		sec = int(defaultMaxRequestTimeout / time.Second)
+	}
+	return sec
+}
+
+func clampTimerSafeDuration(d time.Duration) time.Duration {
+	if d > maxTimerSafeDuration {
+		return maxTimerSafeDuration
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func (c *X402MCPClient) probeTimeout() time.Duration {
+	capSec := c.capSeconds()
+	probeSec := defaultProbeTimeoutSeconds
+	if probeSec > capSec {
+		probeSec = capSec
+	}
+	return clampTimerSafeDuration(time.Duration(probeSec) * time.Second)
+}
+
+func (c *X402MCPClient) paidTimeout(maxTimeoutSeconds int) time.Duration {
+	acceptSec := defaultAcceptTimeoutSeconds
+	if maxTimeoutSeconds > 0 {
+		acceptSec = maxTimeoutSeconds
+	}
+	capSec := c.capSeconds()
+	if acceptSec > capSec {
+		acceptSec = capSec
+	}
+	return clampTimerSafeDuration(time.Duration(acceptSec) * time.Second)
 }

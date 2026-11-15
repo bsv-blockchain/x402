@@ -13,17 +13,24 @@ except ImportError as e:
     ) from e
 
 from .....schemas import PaymentRequirements, SettleResponse
-from ...constants import TX_STATUS_SUCCESS
+from ...settle_receipt import wait_for_receipt_and_build_response
 from ...signer import FacilitatorEvmSigner
+from ...types import TransactionReceipt
+from ...utils import truncate_error_message
 from ..abi import BATCH_SETTLEMENT_ABI
 from ..authorizer_signer import sign_claim_batch, sign_refund
-from ..constants import BATCH_SETTLEMENT_ADDRESS
+from ..constants import (
+    BATCH_SETTLEMENT_ADDRESS,
+    CHANNEL_STATE_POLL_INTERVAL_S,
+    CHANNEL_STATE_POLL_S,
+)
 from ..errors import (
     ERR_AUTHORIZER_ADDRESS_MISMATCH,
     ERR_AUTHORIZER_NOT_CONFIGURED,
     ERR_REFUND_NO_BALANCE,
     ERR_REFUND_SIMULATION_FAILED,
     ERR_REFUND_TRANSACTION_FAILED,
+    ERR_REFUNDED_EVENT_MISMATCH,
 )
 from ..types import (
     AuthorizerSigner,
@@ -33,9 +40,6 @@ from ..types import (
 from ..utils import compute_channel_id
 from .claim import build_voucher_claim_args
 from .utils import read_channel_state, to_contract_channel_config
-
-_REFUND_STATE_POLL_S = 2.0
-_REFUND_STATE_POLL_INTERVAL_S = 0.15
 
 
 def _get_refundable_amount(
@@ -113,7 +117,7 @@ def _read_post_refund_state(
     signer: FacilitatorEvmSigner, channel_id: str, submitted_nonce: str
 ) -> ChannelState | None:
     expected = int(submitted_nonce) + 1
-    deadline = time.time() + _REFUND_STATE_POLL_S
+    deadline = time.time() + CHANNEL_STATE_POLL_S
     while True:
         try:
             state = read_channel_state(signer, channel_id)
@@ -123,7 +127,7 @@ def _read_post_refund_state(
             return state
         if time.time() >= deadline:
             return None
-        time.sleep(_REFUND_STATE_POLL_INTERVAL_S)
+        time.sleep(CHANNEL_STATE_POLL_INTERVAL_S)
 
 
 def _encode_calldata(function_name: str, args: list) -> bytes:
@@ -226,7 +230,7 @@ def execute_refund_with_signature(
                 return SettleResponse(
                     success=False,
                     error_reason=ERR_REFUND_SIMULATION_FAILED,
-                    error_message=str(e)[:500],
+                    error_message=truncate_error_message(str(e)),
                     transaction="",
                     network=network,
                 )
@@ -250,7 +254,7 @@ def execute_refund_with_signature(
                 return SettleResponse(
                     success=False,
                     error_reason=ERR_REFUND_SIMULATION_FAILED,
-                    error_message=str(e)[:500],
+                    error_message=truncate_error_message(str(e)),
                     transaction="",
                     network=network,
                 )
@@ -263,42 +267,105 @@ def execute_refund_with_signature(
                 data_suffix=data_suffix,
             )
 
-        receipt = signer.wait_for_transaction_receipt(tx)
-        if receipt.status != TX_STATUS_SUCCESS:
+        def _build_refund_success(receipt: TransactionReceipt) -> SettleResponse:
+            refunded_amount = _parse_refunded_amount(signer, receipt, contract_addr, channel_id)
+            if not refunded_amount or refunded_amount == "0":
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_REFUNDED_EVENT_MISMATCH,
+                    error_message=(
+                        "refund receipt missing Refunded event with positive amount "
+                        "(possible no-op early return)"
+                    ),
+                    transaction=tx,
+                    network=network,
+                    payer=payload.channel_config.payer,
+                )
+
+            post_state = (
+                _read_post_refund_state(signer, channel_id, payload.refund_nonce)
+                if pre_state and pre_state.withdraw_requested_at != 0
+                else None
+            )
+            if pre_state and post_state:
+                _amount, extra = _build_refund_extra_from_post_state(
+                    channel_id, pre_state, post_state
+                )
+            else:
+                _amount, extra = _build_refund_extra(payload, channel_id, pre_state)
+
             return SettleResponse(
-                success=False,
-                error_reason=ERR_REFUND_TRANSACTION_FAILED,
-                error_message=f"transaction reverted (receipt status {receipt.status})",
+                success=True,
                 transaction=tx,
                 network=network,
+                payer=payload.channel_config.payer,
+                amount=refunded_amount,
+                extra=extra,
             )
 
-        post_state = (
-            _read_post_refund_state(signer, channel_id, payload.refund_nonce)
-            if pre_state and pre_state.withdraw_requested_at != 0
-            else None
-        )
-        if pre_state and post_state:
-            amount, extra = _build_refund_extra_from_post_state(channel_id, pre_state, post_state)
-        else:
-            amount, extra = _build_refund_extra(payload, channel_id, pre_state)
-
-        return SettleResponse(
-            success=True,
-            transaction=tx,
-            network=network,
-            payer=payload.channel_config.payer,
-            amount=amount,
-            extra=extra,
+        return wait_for_receipt_and_build_response(
+            signer,
+            tx,
+            network,
+            payload.channel_config.payer,
+            failed_reason=ERR_REFUND_TRANSACTION_FAILED,
+            on_success=_build_refund_success,
         )
     except Exception as e:
         return SettleResponse(
             success=False,
             error_reason=ERR_REFUND_TRANSACTION_FAILED,
-            error_message=str(e)[:500],
+            error_message=truncate_error_message(str(e)),
             transaction="",
             network=network,
         )
+
+
+def _as_hex(value) -> str:
+    if isinstance(value, bytes | bytearray):
+        return Web3.to_hex(value)
+    return str(value)
+
+
+def _parse_refunded_amount(signer, receipt, contract_addr: str, channel_id: str) -> str:
+    """Extract Refunded amount from receipt logs. Empty/"0" means fail closed.
+
+    Looks up web3 as `web3`, `w3`, or `_w3`. Indexed bytes32 channel ids are
+    compared as hex so web3.py's `bytes` decode matches `compute_channel_id`.
+    """
+    logs = getattr(receipt, "logs", None)
+    if not logs:
+        return ""
+    try:
+        web3 = (
+            getattr(signer, "web3", None)
+            or getattr(signer, "w3", None)
+            or getattr(signer, "_w3", None)
+        )
+        if web3 is None:
+            return ""
+        contract = web3.eth.contract(address=contract_addr, abi=BATCH_SETTLEMENT_ABI)
+        refunded_event = contract.events.Refunded()
+        for log in logs:
+            log_addr = getattr(log, "address", None) or (
+                log.get("address") if isinstance(log, dict) else None
+            )
+            if log_addr is None or to_checksum_address(log_addr) != contract_addr:
+                continue
+            try:
+                decoded = refunded_event.process_log(log)
+            except Exception:
+                continue
+            args = decoded.get("args", {})
+            log_channel = args.get("channelId")
+            amount = args.get("amount", 0)
+            if log_channel is None:
+                continue
+            if _as_hex(log_channel).lower() == channel_id.lower() and int(amount) > 0:
+                return str(int(amount))
+    except Exception:
+        return ""
+    return ""
 
 
 __all__ = ["execute_refund_with_signature"]

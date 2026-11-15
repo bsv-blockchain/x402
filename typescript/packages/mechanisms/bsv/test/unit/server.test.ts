@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { PaymentRequirements } from "@x402/core/types";
 import { ExactBsvScheme } from "../../src/exact/server/scheme";
 import { BSV_TESTNET_CAIP2 } from "../../src/constants";
@@ -9,6 +9,16 @@ describe("ExactBsvScheme (server)", () => {
   });
 
   describe("parsePrice", () => {
+    it.each([
+      ["$0.123456789012345678", "0.123456789012345678"],
+      [1e-7, "0.0000001"],
+    ])("passes %j to money parsers as an exact decimal string", async (price, amount) => {
+      const parser = vi.fn().mockResolvedValue({ amount: "1000", asset: "BSV" });
+      const scheme = new ExactBsvScheme().registerMoneyParser(parser);
+      await scheme.parsePrice(price, BSV_TESTNET_CAIP2);
+      expect(parser).toHaveBeenCalledWith(amount, BSV_TESTNET_CAIP2);
+    });
+
     it("passes through an AssetAmount in satoshis", async () => {
       const scheme = new ExactBsvScheme();
       const result = await scheme.parsePrice({ amount: "1000", asset: "BSV" }, BSV_TESTNET_CAIP2);
@@ -72,7 +82,7 @@ describe("ExactBsvScheme (server)", () => {
 
     it("uses a registered money parser", async () => {
       const scheme = new ExactBsvScheme().registerMoneyParser(async (usd, network) => ({
-        amount: String(Math.round(usd * 2000)),
+        amount: String(Math.round(Number(usd) * 2000)),
         asset: "BSV",
         extra: { network },
       }));

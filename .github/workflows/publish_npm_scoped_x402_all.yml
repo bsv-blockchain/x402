@@ -75,6 +75,7 @@ jobs:
           publish_package "packages/mechanisms/svm"
           publish_package "packages/mechanisms/avm"
           publish_package "packages/mechanisms/aptos"
+          publish_package "packages/mechanisms/bsv"
           publish_package "packages/mechanisms/cardano"
           publish_package "packages/mechanisms/casper"
           publish_package "packages/mechanisms/stellar"

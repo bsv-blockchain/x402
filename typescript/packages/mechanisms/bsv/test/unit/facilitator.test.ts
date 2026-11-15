@@ -609,11 +609,12 @@ describe("ExactBsvScheme (facilitator)", () => {
 
     it("accepts isMerge when newly internalized satoshis are reported (self-payment)", async () => {
       const { scheme, wallet } = makeScheme({ isMerge: true });
-      vi.mocked(wallet.internalizeAction).mockResolvedValueOnce({
-        accepted: true,
+      const walletResult = {
+        accepted: true as const,
         isMerge: true,
         satoshis: 1000,
-      });
+      };
+      vi.mocked(wallet.internalizeAction).mockResolvedValueOnce(walletResult);
       const { beefBase64, txid } = makeBeef(1000);
       const result = await scheme.settle(
         makePayload(makeBsvPayload(beefBase64)),
@@ -670,10 +671,9 @@ describe("ExactBsvScheme (facilitator)", () => {
 
     it("allows retry after a soft rejection (accepted: false rolls back the dedup mark)", async () => {
       const wallet = makeWallet();
-      vi.mocked(wallet.internalizeAction).mockResolvedValueOnce({
-        accepted: false,
-        isMerge: false,
-      });
+      vi.mocked(wallet.internalizeAction).mockImplementationOnce(
+        makeWallet({ accepted: false }).internalizeAction,
+      );
       const scheme = new ExactBsvScheme({ wallet, identityKey: IDENTITY_KEY });
       const { beefBase64, txid } = makeBeef(1000);
       const payload = makePayload(makeBsvPayload(beefBase64));

@@ -58,9 +58,13 @@ import { ExactBsvScheme } from "@x402/bsv/exact/client";
 import { WalletClient } from "@bsv/sdk";
 import { x402Client } from "@x402/core/client";
 
-const client = new x402Client();
+const client = new x402Client().setSpendControls({
+  allowedAssets: [{ network: "bsv:*", asset: "BSV", maxAmountPerPayment: "10000" }],
+});
 client.register("bsv:*", new ExactBsvScheme(new WalletClient()));
 ```
+
+BSV is not USD-pegged, so core's default spend controls require this explicit asset opt-in. The example caps each payment at 10,000 satoshis; choose a cap appropriate to your application. Wallet miner fees are additional.
 
 ### 2. Server Setup
 

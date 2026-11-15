@@ -7,7 +7,7 @@ import type {
   Price,
   SchemeNetworkServer,
 } from "@x402/core/types";
-import { parseMoneyString } from "@x402/core/utils";
+import { numberToDecimalString, parseMoneyString } from "@x402/core/utils";
 import { BSV_ASSET_IDENTIFIER, BSV_DECIMALS, MAX_SATOSHIS } from "../../constants";
 
 /**
@@ -44,7 +44,7 @@ export class ExactBsvScheme implements SchemeNetworkServer {
    * @example
    * ```typescript
    * scheme.registerMoneyParser(async (usd, network) => ({
-   *   amount: String(Math.round((usd / await usdPerBsv()) * 1e8)),
+   *   amount: String(Math.round((Number(usd) / await usdPerBsv()) * 1e8)),
    *   asset: "BSV",
    *   extra: {},
    * }));
@@ -88,8 +88,10 @@ export class ExactBsvScheme implements SchemeNetworkServer {
       };
     }
 
-    // Money: parse to decimal, try registered parsers
-    const amount = this.parseMoneyToDecimal(price);
+    // Preserve decimal digits until the registered parser chooses its conversion.
+    const amount = parseMoneyString(
+      typeof price === "number" ? numberToDecimalString(price) : price,
+    );
 
     for (const parser of this.moneyParsers) {
       const result = await parser(amount, network);
@@ -153,17 +155,6 @@ export class ExactBsvScheme implements SchemeNetworkServer {
         ...(supportedKind.extra ?? {}),
       },
     });
-  }
-
-  /**
-   * Parses Money (string | number) to a plain decimal number.
-   *
-   * @param money - Raw price to parse
-   * @returns Decimal number
-   */
-  private parseMoneyToDecimal(money: string | number): number {
-    if (typeof money === "number") return money;
-    return Number(parseMoneyString(money));
   }
 
   /**

@@ -165,6 +165,7 @@ async function main(): Promise<void> {
 
   const client = new x402Client().setSpendControls({
     allowedAssets: [
+      { network: "bsv:*", asset: "BSV", maxAmountPerPayment: "10000" },
       { network: "xrpl:*", asset: "XRP" },
       { network: "ccd:*", asset: "CCD" },
     ],
